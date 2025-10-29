@@ -172,4 +172,20 @@ const char kEnableGpuMainTimeKeeperMetrics[] =
 // log expectation comparisons.
 const char kSuppressPerformanceLogs[] = "suppress-performance-logs";
 
+// Override GL renderer string for testing purposes.
+const char kGpuTestingGlRenderer[] = "gpu-testing-gl-renderer";
+
+// Override GL vendor string for testing purposes.
+const char kGpuTestingGlVendor[] = "gpu-testing-gl-vendor";
+
+// Override WebGL renderer string for testing purposes.
+const char kWebglRenderer[] = "webgl-renderer";
+
+// Override WebGL vendor string for testing purposes.
+const char kWebglVendor[] = "webgl-vendor";
+[[maybe_unused]] const char kCanvasRenderer[] = "canvas-renderer";
+[[maybe_unused]] const char kCanvasVendor[] = "canvas-vendor";
+
+const char kCanvasNoise[] = "canvas-noise";
+const char kCanvasSeed[] = "canvas-seed";
 }  // namespace switches

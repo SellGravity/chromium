@@ -23,17 +23,23 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_WEBGL_DEBUG_RENDERER_INFO_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_WEBGL_DEBUG_RENDERER_INFO_H_
 
+
 #include "third_party/blink/renderer/modules/webgl/webgl_extension.h"
+
 
 namespace blink {
 
+
 class ExecutionContext;
+
 
 class WebGLDebugRendererInfo final : public WebGLExtension {
   DEFINE_WRAPPERTYPEINFO();
+
 
  public:
   enum EnumType {
@@ -41,14 +47,33 @@ class WebGLDebugRendererInfo final : public WebGLExtension {
     kUnmaskedRendererWebgl = 0x9246
   };
 
+
   WebGLDebugRendererInfo(WebGLRenderingContextBase*, ExecutionContext*);
+
+
+  // ==================== WebGL Static Methods ====================
+  // Static methods to access command-line switches for WebGL strings
+  static std::string GetWebGLVendorOverride();
+  static std::string GetWebGLRendererOverride();
+
+
+  // ==================== Canvas Static Methods ====================
+  // Static methods to access command-line switches for Canvas fingerprinting
+  static std::string GetCanvasVendorOverride();
+  static std::string GetCanvasRendererOverride();
+  static std::string GetCanvasNoiseOverride();
+  static std::string GetCanvasSeedOverride();
+
 
   static bool Supported(WebGLRenderingContextBase*);
   static const char* ExtensionName();
 
+
   WebGLExtensionName GetName() const override;
 };
 
+
 }  // namespace blink
+
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_WEBGL_DEBUG_RENDERER_INFO_H_

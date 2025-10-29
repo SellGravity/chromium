@@ -127,11 +127,17 @@
 #include "ui/gfx/geometry/rect_f.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/geometry/skia_conversions.h"
-
+#include "base/command_line.h"
+#include "base/strings/string_number_conversions.h"
+#include "third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.h"
 // UMA Histogram macros trigger a bug in IWYU.
 // https://github.com/include-what-you-use/include-what-you-use/issues/1546
 // IWYU pragma: no_include <atomic>
 // IWYU pragma: no_include "base/metrics/histogram_base.h"
+#include "gpu/config/gpu_switches.h"
+#include "third_party/blink/renderer/modules/canvas/canvas_device_profile.h"
+#include "third_party/blink/renderer/modules/canvas/canvas_content_generator.h"
+
 
 namespace base {
 struct PendingTask;
@@ -139,6 +145,7 @@ struct PendingTask;
 namespace cc {
 class PaintFlags;
 }  // namespace cc
+
 
 namespace blink {
 class ExecutionContext;
@@ -739,6 +746,8 @@ scoped_refptr<StaticBitmapImage> blink::CanvasRenderingContext2D::GetImage(
   return resource_provider_->Snapshot(reason);
 }
 
+
+
 ImageData* CanvasRenderingContext2D::getImageDataInternal(
     int sx,
     int sy,
@@ -750,9 +759,17 @@ ImageData* CanvasRenderingContext2D::getImageDataInternal(
       "Blink.Canvas.GetImageData.WillReadFrequently",
       CreationAttributes().will_read_frequently ==
           CanvasContextCreationAttributesCore::WillReadFrequently::kTrue);
-  return BaseRenderingContext2D::getImageDataInternal(
+
+  ImageData* image_data = BaseRenderingContext2D::getImageDataInternal(
       sx, sy, sw, sh, image_data_settings, exception_state);
+  
+  // TODO: Add noise application once pixel buffer access is properly exposed
+  // Currently unable to access pixel data due to WebIDL union type limitations
+  
+  return image_data;
 }
+
+
 
 void CanvasRenderingContext2D::drawElement(Element* element,
                                            double x,

@@ -25,6 +25,11 @@
 
 #include "third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.h"
 
+#include "base/command_line.h"
+#include "base/strings/string_number_conversions.h"
+#include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+
+
 namespace blink {
 
 WebGLDebugRendererInfo::WebGLDebugRendererInfo(
@@ -32,16 +37,75 @@ WebGLDebugRendererInfo::WebGLDebugRendererInfo(
     ExecutionContext*)
     : WebGLExtension(context) {}
 
-WebGLExtensionName WebGLDebugRendererInfo::GetName() const {
-  return kWebGLDebugRendererInfoName;
-}
-
-bool WebGLDebugRendererInfo::Supported(WebGLRenderingContextBase*) {
+bool WebGLDebugRendererInfo::Supported(
+    WebGLRenderingContextBase* context) {
   return true;
 }
 
 const char* WebGLDebugRendererInfo::ExtensionName() {
   return "WEBGL_debug_renderer_info";
+}
+
+WebGLExtensionName WebGLDebugRendererInfo::GetName() const {
+  return kWebGLDebugRendererInfoName;
+}
+
+// ==================== WebGL Override Methods ====================
+
+// Static method to get WebGL vendor override from command line
+std::string WebGLDebugRendererInfo::GetWebGLVendorOverride() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("webgl-vendor")) {
+    return command_line->GetSwitchValueASCII("webgl-vendor");
+  }
+  return std::string();
+}
+
+// Static method to get WebGL renderer override from command line
+std::string WebGLDebugRendererInfo::GetWebGLRendererOverride() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("webgl-renderer")) {
+    return command_line->GetSwitchValueASCII("webgl-renderer");
+  }
+  return std::string();
+}
+
+// ==================== Canvas Override Methods ====================
+
+// Static method to get Canvas vendor override from command line
+std::string WebGLDebugRendererInfo::GetCanvasVendorOverride() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("canvas-vendor")) {
+    return command_line->GetSwitchValueASCII("canvas-vendor");
+  }
+  return std::string();
+}
+
+// Static method to get Canvas renderer override from command line
+std::string WebGLDebugRendererInfo::GetCanvasRendererOverride() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("canvas-renderer")) {
+    return command_line->GetSwitchValueASCII("canvas-renderer");
+  }
+  return std::string();
+}
+
+// Static method to get Canvas noise flag from command line
+std::string WebGLDebugRendererInfo::GetCanvasNoiseOverride() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("canvas-noise")) {
+    return command_line->GetSwitchValueASCII("canvas-noise");
+  }
+  return std::string();
+}
+
+// Static method to get Canvas seed from command line
+std::string WebGLDebugRendererInfo::GetCanvasSeedOverride() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("canvas-seed")) {
+    return command_line->GetSwitchValueASCII("canvas-seed");
+  }
+  return std::string();
 }
 
 }  // namespace blink

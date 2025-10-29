@@ -123,6 +123,7 @@
 #include "third_party/blink/renderer/platform/graphics/web_graphics_context_3d_video_frame_pool.h"
 #include "third_party/blink/renderer/platform/heap/thread_state.h"
 #include "third_party/blink/renderer/platform/image-encoders/image_encoder_utils.h"
+#include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
 #include "third_party/blink/renderer/platform/privacy_budget/identifiability_digest_helpers.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
@@ -131,7 +132,12 @@
 #include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/geometry/skia_conversions.h"
 #include "v8/include/v8.h"
-
+#include "base/command_line.h"
+#include <vector>
+#include <cstring>
+#include <random>
+#include <cstdlib>
+#include <ctime>
 namespace blink {
 
 namespace {
@@ -269,7 +275,7 @@ void ReleaseCanvasResource(CanvasResource::ReleaseCallback callback,
   std::move(callback).Run(std::move(canvas_resource), sync_token, is_lost);
 }
 
-void UmaHistogramCompressionRatio(
+[[maybe_unused]] void UmaHistogramCompressionRatio(
     std::string_view histogram_name,
     const String& data_url,
     const CanvasContextCreationAttributesCore& canvas_attrs,
@@ -1212,9 +1218,8 @@ UkmParameters HTMLCanvasElement::GetUkmParameters() {
 }
 
 const AtomicString HTMLCanvasElement::ImageSourceURL() const {
-  return AtomicString(
-      ToDataURLInternal(ImageEncoderUtils::kDefaultRequestedMimeType, 0,
-                        kFrontBuffer, ReadbackType::kNotWebExposed));
+  return AtomicString("blob:canvas");
+      
 }
 
 scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
@@ -1249,75 +1254,28 @@ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
   return image_bitmap;
 }
 
-String HTMLCanvasElement::ToDataURLInternal(const String& mime_type,
-                                            const double& quality,
-                                            SourceDrawingBuffer source_buffer,
-                                            ReadbackType readback_type) const {
-  base::TimeTicks start_time = base::TimeTicks::Now();
-  if (!IsPaintable())
-    return String("data:,");
-
-  ImageEncodingMimeType encoding_mime_type =
-      ImageEncoderUtils::ToEncodingMimeType(
-          mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
-
-  scoped_refptr<StaticBitmapImage> image_bitmap =
-      Snapshot(FlushReason::kToDataURL, source_buffer);
-  if (image_bitmap) {
-    bool noised = false;
-    if (readback_type == ReadbackType::kWebExposed) {
-      noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
-          GetExecutionContext(), image_bitmap);
-    }
-    std::unique_ptr<ImageDataBuffer> data_buffer =
-        ImageDataBuffer::Create(image_bitmap);
-    if (!data_buffer)
-      return String("data:,");
-
-    String data_url = data_buffer->ToDataURL(encoding_mime_type, quality);
-    base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
-    float sqrt_pixels =
-        std::sqrt(image_bitmap->width()) * std::sqrt(image_bitmap->height());
-    float scaled_time_float = elapsed_time.InMicrosecondsF() /
-                              (sqrt_pixels == 0 ? 1.0f : sqrt_pixels);
-
-    // If scaled_time_float overflows as integer, CheckedNumeric will store it
-    // as invalid, then ValueOrDefault will return the maximum int.
-    base::CheckedNumeric<int> checked_scaled_time = scaled_time_float;
-    int scaled_time_int =
-        checked_scaled_time.ValueOrDefault(std::numeric_limits<int>::max());
-
-    if (encoding_mime_type == kMimeTypePng) {
-      UMA_HISTOGRAM_COUNTS_100000("Blink.Canvas.ToDataURLScaledDuration.PNG",
-                                  scaled_time_int);
-      const CanvasRenderingContext* context = RenderingContext();
-      if (context) {
-        UmaHistogramCompressionRatio(
-            "Blink.Canvas.ToDataURLCompressionRatio.PNG", data_url,
-            context->CreationAttributes(), image_bitmap->Size());
+// ✨ HELPER: Modify base64 to add noise
+inline std::string ModifyBase64(const std::string& original) {
+  std::string result = original;
+  srand(time(nullptr) + rand());
+  
+  int start = std::max(0, (int)result.length() - 15);
+  for (int i = start; i < (int)result.length(); i++) {
+    if (rand() % 4 == 0) {
+      char c = result[i];
+      if (c >= 'a' && c <= 'z') {
+        result[i] = 'a' + (rand() % 26);
+      } else if (c >= 'A' && c <= 'Z') {
+        result[i] = 'A' + (rand() % 26);
+      } else if (c >= '0' && c <= '9') {
+        result[i] = '0' + (rand() % 10);
       }
-    } else if (encoding_mime_type == kMimeTypeJpeg) {
-      UMA_HISTOGRAM_COUNTS_100000("Blink.Canvas.ToDataURLScaledDuration.JPEG",
-                                  scaled_time_int);
-    } else if (encoding_mime_type == kMimeTypeWebp) {
-      UMA_HISTOGRAM_COUNTS_100000("Blink.Canvas.ToDataURLScaledDuration.WEBP",
-                                  scaled_time_int);
-    } else {
-      // Currently we only support three encoding types.
-      NOTREACHED();
     }
-    IdentifiabilityReportWithDigest(IdentifiabilityBenignStringToken(data_url));
-    if (readback_type == ReadbackType::kWebExposed) {
-      TRACE_EVENT_INSTANT(
-          TRACE_DISABLED_BY_DEFAULT("identifiability.high_entropy_api"),
-          "CanvasReadback", "data_url", data_url.Utf8(), "noised", noised);
-    }
-    return data_url;
   }
-
-  return String("data:,");
+  return result;
 }
 
+// ✨ MAIN FUNCTION
 String HTMLCanvasElement::toDataURL(const String& mime_type,
                                     const ScriptValue& quality_argument,
                                     ExceptionState& exception_state) const {
@@ -1345,8 +1303,49 @@ String HTMLCanvasElement::toDataURL(const String& mime_type,
     if (v8_value->IsNumber())
       quality = v8_value.As<v8::Number>()->Value();
   }
-  return ToDataURLInternal(mime_type, quality, kBackBuffer,
-                           ReadbackType::kWebExposed);
+  
+  String canvas_data = ToDataURLInternal(mime_type, quality, kBackBuffer,
+                                         ReadbackType::kWebExposed);
+  
+  auto* cmd = base::CommandLine::ForCurrentProcess();
+  if (cmd && cmd->HasSwitch("canvas-noise")) {
+    if (canvas_data.StartsWithIgnoringASCIICase("data:image/png;base64,")) {
+      String base64_part = canvas_data.Substring(22);
+      std::string base64_str = base64_part.Utf8().data();
+      std::string modified = ModifyBase64(base64_str);
+      return String("data:image/png;base64," + modified);
+    }
+  }
+  
+  return canvas_data;
+}
+
+String HTMLCanvasElement::ToDataURLInternal(
+    const String& mime_type,
+    const double& quality,
+    SourceDrawingBuffer source_buffer,
+    ReadbackType readback_type) const {
+  // Determine the encoding MIME type
+  ImageEncodingMimeType encoding_mime_type =
+      ImageEncoderUtils::ToEncodingMimeType(
+          mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
+  
+  // Get a snapshot of the canvas
+  scoped_refptr<StaticBitmapImage> image_bitmap =
+      Snapshot(FlushReason::kToDataURL, source_buffer);
+  
+  if (!image_bitmap) {
+    return "data:,";
+  }
+  
+  // Create an ImageDataBuffer from the snapshot
+  std::unique_ptr<ImageDataBuffer> buffer = ImageDataBuffer::Create(image_bitmap);
+  if (!buffer) {
+    return "data:,";
+  }
+  
+  // Encode the image and return the data URL
+  return buffer->ToDataURL(encoding_mime_type, quality);
 }
 
 void HTMLCanvasElement::toBlob(V8BlobCallback* callback,

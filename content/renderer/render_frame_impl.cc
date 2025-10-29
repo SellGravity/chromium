@@ -252,6 +252,8 @@
 #include "v8/include/v8-local-handle.h"
 #include "v8/include/v8-microtask-queue.h"
 
+#include "base/command_line.h"
+
 #if BUILDFLAG(IS_ANDROID)
 #include <cpu-features.h>
 
@@ -4655,9 +4657,30 @@ void RenderFrameImpl::DidCreateScriptContext(v8::Local<v8::Context> context,
         context, std::move(mojo_js_interface_broker_));
   }
 
+  // ============================================================
+  // THÊM PHẦN NÀY - Canvas Seed Injection
+  // ============================================================
+ auto* command_line = base::CommandLine::ForCurrentProcess();
+if (command_line->HasSwitch("canvas-seed")) {
+  std::string seed_str = command_line->GetSwitchValueASCII("canvas-seed");
+  std::string script = "window.__CANVAS_SEED__=" + seed_str + ";";
+  
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
+  v8::Context::Scope context_scope(context);
+  v8::Local<v8::String> source = 
+      v8::String::NewFromUtf8(isolate, script.c_str(), v8::NewStringType::kNormal)
+          .ToLocalChecked();
+  v8::Local<v8::Script> s;
+  if (v8::Script::Compile(context, source).ToLocal(&s)) {
+    s->Run(context).ToLocalChecked();
+  }
+}
+  // ============================================================
+
   for (auto& observer : observers_)
     observer.DidCreateScriptContext(context, world_id);
 }
+
 
 void RenderFrameImpl::WillReleaseScriptContext(v8::Local<v8::Context> context,
                                                int world_id) {

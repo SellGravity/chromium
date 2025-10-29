@@ -58,7 +58,12 @@ GPU_CONFIG_EXPORT extern const char kEnableSkiaGraphitePrecompilation[];
 GPU_CONFIG_EXPORT extern const char kUseRedistributableDirectML[];
 GPU_CONFIG_EXPORT extern const char kEnableGpuMainTimeKeeperMetrics[];
 GPU_CONFIG_EXPORT extern const char kSuppressPerformanceLogs[];
-
+GPU_CONFIG_EXPORT extern const char kGpuTestingGlRenderer[];
+GPU_CONFIG_EXPORT extern const char kGpuTestingGlVendor[];
+GPU_CONFIG_EXPORT extern const char kWebglRenderer[];
+GPU_CONFIG_EXPORT extern const char kWebglVendor[];
+GPU_CONFIG_EXPORT extern const char kCanvasNoise[];
+GPU_CONFIG_EXPORT extern const char kCanvasSeed[];
 }  // namespace switches
 
 #endif  // GPU_CONFIG_GPU_SWITCHES_H_

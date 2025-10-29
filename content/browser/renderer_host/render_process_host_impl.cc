@@ -3568,6 +3568,14 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
   // Propagate the following switches to the renderer command line (along
   // with any associated values) if present in the browser command line.
   static const char* const kSwitchNames[] = {
+     "gpu-testing-gl-renderer",     
+    "gpu-testing-gl-vendor",
+    "webgl-renderer",
+    "webgl-vendor",
+    "canvas-renderer",
+    "canvas-vendor",
+    "canvas-noise",
+    "canvas-seed",
       switches::kDisableInProcessStackTraces,
       sandbox::policy::switches::kDisableLandlockSandbox,
       sandbox::policy::switches::kDisableSeccompFilterSandbox,

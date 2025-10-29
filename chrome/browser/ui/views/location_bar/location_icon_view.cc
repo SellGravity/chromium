@@ -46,7 +46,12 @@
 #include "ui/views/controls/label.h"
 #include "ui/views/style/platform_style.h"
 #include "ui/views/view_class_properties.h"
-
+#include "chrome/browser/profiles/profile_manager.h"
+#include "chrome/browser/profiles/profile_attributes_storage.h"
+#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_finder.h"
+#include "ui/base/l10n/l10n_util.h"
+#include "chrome/browser/browser_process.h"
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
 #include "components/vector_icons/vector_icons.h"  // nogncheck
 #endif
@@ -112,7 +117,9 @@ SkColor LocationIconView::GetForegroundColor() const {
 bool LocationIconView::ShouldShowSeparator() const {
   return false;
 }
-
+bool LocationIconView::ShouldShowLabel() const {
+  return true;
+}
 bool LocationIconView::ShouldShowLabelAfterAnimation() const {
   return ShouldShowLabel();
 }
@@ -202,8 +209,49 @@ bool LocationIconView::GetShowText() const {
 const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
   return views::InkDrop::Get(this)->GetInkDrop();
 }
+namespace {
 
+// Helper function to get current profile name
+std::u16string GetCurrentProfileName() {
+  // Lấy last used profile
+  Profile* profile = ProfileManager::GetLastUsedProfileIfLoaded();
+  
+  if (!profile) {
+    // Nếu không lấy được profile, return empty string
+    return std::u16string();
+  }
+
+  // Lấy ProfileManager instance
+  ProfileManager* manager = g_browser_process->profile_manager();
+  if (!manager) {
+    return std::u16string();
+  }
+
+  // Lấy ProfileAttributesStorage để truy cập profile attributes
+  ProfileAttributesStorage& storage = manager->GetProfileAttributesStorage();
+  
+  // Lấy profile path
+  base::FilePath profile_path = profile->GetPath();
+  
+  // Lấy ProfileAttributesEntry cho profile này
+  ProfileAttributesEntry* entry = storage.GetProfileAttributesWithPath(profile_path);
+  
+  if (!entry) {
+    return std::u16string();
+  }
+
+  // Lấy profile name (display name)
+  std::u16string profile_name = entry->GetName();
+  
+  return profile_name;
+}
+
+}  // namespace
 std::u16string LocationIconView::GetText() const {
+    std::u16string profile_name = GetCurrentProfileName();
+  if (!profile_name.empty()) {
+    return profile_name;
+  }
   if (delegate_->IsEditingOrEmpty()) {
     return std::u16string();
   }
@@ -236,8 +284,8 @@ std::u16string LocationIconView::GetText() const {
       return extension_name;
     }
   }
-
-  return delegate_->GetLocationBarModel()->GetSecureDisplayText();
+return u"Qkhai";
+  // return delegate_->GetLocationBarModel()->GetSecureDisplayText();
 }
 
 bool LocationIconView::GetAnimateTextVisibilityChange() const {

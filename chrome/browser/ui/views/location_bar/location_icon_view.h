@@ -27,6 +27,7 @@ class LocationIconView : public IconLabelBubbleView {
   METADATA_HEADER(LocationIconView, IconLabelBubbleView)
 
  public:
+  bool ShouldShowLabel() const override;
   class Delegate {
    public:
     using IconFetchedCallback =
