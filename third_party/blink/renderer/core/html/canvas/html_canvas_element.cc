@@ -116,6 +116,7 @@
 #include "third_party/blink/renderer/platform/graphics/image_data_buffer.h"
 #include "third_party/blink/renderer/platform/graphics/memory_managed_paint_recorder.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_canvas.h"
+#include "third_party/blink/renderer/platform/graphics/paint/paint_image.h"
 #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
 #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
 #include "third_party/blink/renderer/platform/graphics/static_bitmap_image_to_video_frame_copier.h"
@@ -133,14 +134,105 @@
 #include "ui/gfx/geometry/skia_conversions.h"
 #include "v8/include/v8.h"
 #include "base/command_line.h"
-#include <vector>
-#include <cstring>
-#include <random>
-#include <cstdlib>
 #include <ctime>
+#include <random>
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkImage.h"
+
 namespace blink {
 
 namespace {
+
+// Helper: Apply canvas noise by creating a NEW modified StaticBitmapImage
+// Returns a new image with noise applied, or nullptr on failure
+scoped_refptr<StaticBitmapImage> CreateNoisedImage(
+    scoped_refptr<StaticBitmapImage> source_image,
+    const std::string& seed_str) {
+  if (!source_image) {
+    return nullptr;
+  }
+
+  // Generate seed for random noise
+  uint32_t seed = 0;
+  if (!seed_str.empty()) {
+    std::hash<std::string> hasher;
+    seed = hasher(seed_str) & 0xFFFFFFFF;
+  } else {
+    seed = static_cast<uint32_t>(std::time(nullptr));
+  }
+
+  std::mt19937 gen(seed);
+  std::uniform_int_distribution<int> dis(-3, 3);
+
+  // Get source SkImage
+  PaintImage paint_image = source_image->PaintImageForCurrentFrame();
+  sk_sp<SkImage> sk_image = paint_image.GetSwSkImage();
+  if (!sk_image) {
+    DVLOG(1) << "CreateNoisedImage: Failed to get SkImage";
+    return nullptr;
+  }
+
+  // Create a NEW mutable SkBitmap
+  SkBitmap bitmap;
+  SkImageInfo info = sk_image->imageInfo();
+  if (!bitmap.tryAllocPixels(info)) {
+    DVLOG(1) << "CreateNoisedImage: Failed to allocate bitmap";
+    return nullptr;
+  }
+
+  // Read pixels from source image to our mutable bitmap
+  if (!sk_image->readPixels(bitmap.pixmap(), 0, 0)) {
+    DVLOG(1) << "CreateNoisedImage: Failed to read pixels";
+    return nullptr;
+  }
+
+  // Modify pixels - add noise to RGB channels only (not alpha)
+  uint8_t* pixels = static_cast<uint8_t*>(bitmap.getPixels());
+  if (!pixels) {
+    DVLOG(1) << "CreateNoisedImage: Failed to get pixel data";
+    return nullptr;
+  }
+
+  size_t pixel_count = bitmap.width() * bitmap.height();
+  int bytes_per_pixel = bitmap.bytesPerPixel();
+
+  for (size_t i = 0; i < pixel_count; ++i) {
+    size_t byte_index = i * bytes_per_pixel;
+
+    // Add noise to RGB channels (skip alpha channel)
+    for (int channel = 0; channel < 3 && channel < bytes_per_pixel; ++channel) {
+      int noise = dis(gen);
+      int current_value = pixels[byte_index + channel];
+      int new_value = current_value + noise;
+      // Clamp to [0, 255]
+      pixels[byte_index + channel] = static_cast<uint8_t>(
+          std::max(0, std::min(255, new_value)));
+    }
+  }
+
+  // Create NEW SkImage from modified bitmap
+  sk_sp<SkImage> noised_sk_image = SkImages::RasterFromBitmap(bitmap);
+  if (!noised_sk_image) {
+    DVLOG(1) << "CreateNoisedImage: Failed to create SkImage from bitmap";
+    return nullptr;
+  }
+
+  // Create NEW StaticBitmapImage from modified SkImage
+  PaintImage noised_paint_image = PaintImageBuilder::WithDefault()
+      .set_image(noised_sk_image, PaintImage::GetNextContentId())
+      .set_id(PaintImage::GetNextId())
+      .TakePaintImage();
+
+  scoped_refptr<StaticBitmapImage> noised_image =
+      StaticBitmapImage::Create(std::move(noised_paint_image), source_image->Orientation());
+
+  if (noised_image) {
+    DVLOG(1) << "Canvas noise applied successfully with seed: " << seed
+             << " to " << pixel_count << " pixels";
+  }
+
+  return noised_image;
+}
 
 constexpr unsigned kMaxCanvasAnimationBacklog = 2;
 
@@ -1254,26 +1346,6 @@ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
   return image_bitmap;
 }
 
-// ✨ HELPER: Modify base64 to add noise
-inline std::string ModifyBase64(const std::string& original) {
-  std::string result = original;
-  srand(time(nullptr) + rand());
-  
-  int start = std::max(0, (int)result.length() - 15);
-  for (int i = start; i < (int)result.length(); i++) {
-    if (rand() % 4 == 0) {
-      char c = result[i];
-      if (c >= 'a' && c <= 'z') {
-        result[i] = 'a' + (rand() % 26);
-      } else if (c >= 'A' && c <= 'Z') {
-        result[i] = 'A' + (rand() % 26);
-      } else if (c >= '0' && c <= '9') {
-        result[i] = '0' + (rand() % 10);
-      }
-    }
-  }
-  return result;
-}
 
 // ✨ MAIN FUNCTION
 String HTMLCanvasElement::toDataURL(const String& mime_type,
@@ -1307,16 +1379,6 @@ String HTMLCanvasElement::toDataURL(const String& mime_type,
   String canvas_data = ToDataURLInternal(mime_type, quality, kBackBuffer,
                                          ReadbackType::kWebExposed);
   
-  auto* cmd = base::CommandLine::ForCurrentProcess();
-  if (cmd && cmd->HasSwitch("canvas-noise")) {
-    if (canvas_data.StartsWithIgnoringASCIICase("data:image/png;base64,")) {
-      String base64_part = canvas_data.Substring(22);
-      std::string base64_str = base64_part.Utf8().data();
-      std::string modified = ModifyBase64(base64_str);
-      return String("data:image/png;base64," + modified);
-    }
-  }
-  
   return canvas_data;
 }
 
@@ -1325,28 +1387,93 @@ String HTMLCanvasElement::ToDataURLInternal(
     const double& quality,
     SourceDrawingBuffer source_buffer,
     ReadbackType readback_type) const {
-  // Determine the encoding MIME type
+  
+  base::TimeTicks start_time = base::TimeTicks::Now();
+  if (!IsPaintable())
+    return String("data:,");
+
   ImageEncodingMimeType encoding_mime_type =
       ImageEncoderUtils::ToEncodingMimeType(
           mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
-  
-  // Get a snapshot of the canvas
+
   scoped_refptr<StaticBitmapImage> image_bitmap =
       Snapshot(FlushReason::kToDataURL, source_buffer);
   
-  if (!image_bitmap) {
-    return "data:,";
+  if (image_bitmap) {
+    bool noised = false;
+    if (readback_type == ReadbackType::kWebExposed) {
+      noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
+          GetExecutionContext(), image_bitmap);
+    }
+
+    // Apply custom canvas noise if flag is set (BEFORE creating ImageDataBuffer)
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("canvas-noise")) {
+      std::string seed_str = "";
+      if (cmd->HasSwitch("canvas-seed")) {
+        seed_str = cmd->GetSwitchValueASCII("canvas-seed");
+      }
+
+      // Create a NEW noised image (doesn't modify original)
+      scoped_refptr<StaticBitmapImage> noised_image =
+          CreateNoisedImage(image_bitmap, seed_str);
+
+      if (noised_image) {
+        // Replace image_bitmap with noised version
+        image_bitmap = noised_image;
+        DVLOG(1) << "Canvas noise applied with seed: " << seed_str;
+      } else {
+        DVLOG(1) << "Canvas noise failed - using original image";
+      }
+    }
+
+    // Create ImageDataBuffer from (possibly noised) image_bitmap
+    std::unique_ptr<ImageDataBuffer> data_buffer =
+        ImageDataBuffer::Create(image_bitmap);
+    if (!data_buffer)
+      return String("data:,");
+
+    String data_url = data_buffer->ToDataURL(encoding_mime_type, quality);
+    
+    base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
+    float sqrt_pixels =
+        std::sqrt(image_bitmap->width()) * std::sqrt(image_bitmap->height());
+    float scaled_time_float = elapsed_time.InMicrosecondsF() /
+        (sqrt_pixels == 0 ? 1.0f : sqrt_pixels);
+
+    base::CheckedNumeric<int> checked_scaled_time = scaled_time_float;
+    int scaled_time_int =
+        checked_scaled_time.ValueOrDefault(std::numeric_limits<int>::max());
+
+    if (encoding_mime_type == kMimeTypePng) {
+      UMA_HISTOGRAM_COUNTS_100000("Blink.Canvas.ToDataURLScaledDuration.PNG",
+                                   scaled_time_int);
+      const CanvasRenderingContext* context = RenderingContext();
+      if (context) {
+        UmaHistogramCompressionRatio(
+            "Blink.Canvas.ToDataURLCompressionRatio.PNG", data_url,
+            context->CreationAttributes(), image_bitmap->Size());
+      }
+    } else if (encoding_mime_type == kMimeTypeJpeg) {
+      UMA_HISTOGRAM_COUNTS_100000("Blink.Canvas.ToDataURLScaledDuration.JPEG",
+                                   scaled_time_int);
+    } else if (encoding_mime_type == kMimeTypeWebp) {
+      UMA_HISTOGRAM_COUNTS_100000("Blink.Canvas.ToDataURLScaledDuration.WEBP",
+                                   scaled_time_int);
+    }
+    
+    IdentifiabilityReportWithDigest(IdentifiabilityBenignStringToken(data_url));
+    if (readback_type == ReadbackType::kWebExposed) {
+      TRACE_EVENT_INSTANT(
+          TRACE_DISABLED_BY_DEFAULT("identifiability.high_entropy_api"),
+          "CanvasReadback", "data_url", data_url.Utf8(), "noised", noised);
+    }
+    return data_url;
   }
   
-  // Create an ImageDataBuffer from the snapshot
-  std::unique_ptr<ImageDataBuffer> buffer = ImageDataBuffer::Create(image_bitmap);
-  if (!buffer) {
-    return "data:,";
-  }
-  
-  // Encode the image and return the data URL
-  return buffer->ToDataURL(encoding_mime_type, quality);
+  return String("data:,");
 }
+
 
 void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
                                const String& mime_type,

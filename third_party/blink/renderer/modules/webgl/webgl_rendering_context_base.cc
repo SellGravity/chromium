@@ -3991,8 +3991,14 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
       return GetIntParameter(script_state, pname);
     case GL_RENDERBUFFER_BINDING:
       return WebGLAny(script_state, renderbuffer_binding_.Get());
-    case GL_RENDERER:
+    case GL_RENDERER: {
+      // Check for command-line override first
+      std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
+      if (!renderer_override.empty()) {
+        return WebGLAny(script_state, String(renderer_override.c_str()));
+      }
       return WebGLAny(script_state, String("WebKit WebGL"));
+    }
     case GL_SAMPLE_ALPHA_TO_COVERAGE:
       return GetBooleanParameter(script_state, pname);
     case GL_SAMPLE_BUFFERS:
@@ -4075,8 +4081,14 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
       return WebGLAny(script_state, unpack_premultiply_alpha_);
     case GC3D_UNPACK_COLORSPACE_CONVERSION_WEBGL:
       return WebGLAny(script_state, unpack_colorspace_conversion_);
-    case GL_VENDOR:
+    case GL_VENDOR: {
+      // Check for command-line override first
+      std::string vendor_override = WebGLDebugRendererInfo::GetWebGLVendorOverride();
+      if (!vendor_override.empty()) {
+        return WebGLAny(script_state, String(vendor_override.c_str()));
+      }
       return WebGLAny(script_state, String("WebKit"));
+    }
     case GL_VERSION:
       if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
               blink::IdentifiableSurface::Type::kWebGLParameter)) {
@@ -4099,14 +4111,21 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
       return ScriptValue::CreateNull(script_state->GetIsolate());
     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+        // Check for command-line override first
+        std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
+        String renderer_string;
+        if (!renderer_override.empty()) {
+          renderer_string = String(renderer_override.c_str());
+        } else {
+          renderer_string = String(ContextGL()->GetString(GL_RENDERER));
+        }
+
         if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
                 blink::IdentifiableSurface::Type::kWebGLParameter)) {
           RecordIdentifiableGLParameterDigest(
-              pname, IdentifiabilityBenignStringToken(
-                         String(ContextGL()->GetString(GL_RENDERER))));
+              pname, IdentifiabilityBenignStringToken(renderer_string));
         }
-        return WebGLAny(script_state,
-                        String(ContextGL()->GetString(GL_RENDERER)));
+        return WebGLAny(script_state, renderer_string);
       }
       SynthesizeGLError(
           GL_INVALID_ENUM, "getParameter",
@@ -4114,14 +4133,21 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
       return ScriptValue::CreateNull(script_state->GetIsolate());
     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+        // Check for command-line override first
+        std::string vendor_override = WebGLDebugRendererInfo::GetWebGLVendorOverride();
+        String vendor_string;
+        if (!vendor_override.empty()) {
+          vendor_string = String(vendor_override.c_str());
+        } else {
+          vendor_string = String(ContextGL()->GetString(GL_VENDOR));
+        }
+
         if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
                 blink::IdentifiableSurface::Type::kWebGLParameter)) {
           RecordIdentifiableGLParameterDigest(
-              pname, IdentifiabilityBenignStringToken(
-                         String(ContextGL()->GetString(GL_VENDOR))));
+              pname, IdentifiabilityBenignStringToken(vendor_string));
         }
-        return WebGLAny(script_state,
-                        String(ContextGL()->GetString(GL_VENDOR)));
+        return WebGLAny(script_state, vendor_string);
       }
       SynthesizeGLError(
           GL_INVALID_ENUM, "getParameter",
