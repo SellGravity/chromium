@@ -551,6 +551,9 @@ const char kProfileEmail[] = "profile-email";
 const char kCreateProfileEmailIfNotExists[] =
     "create-profile-email-if-not-exists";
 
+// Overrides the display name of the profile shown in the UI.
+const char kProfileName[] = "profile-name";
+
 // Forces proxy auto-detection.
 const char kProxyAutoDetect[] = "proxy-auto-detect";
 

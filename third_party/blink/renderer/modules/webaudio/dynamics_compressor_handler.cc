@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/modules/webaudio/dynamics_compressor_handler.h"
 
+#include "base/command_line.h"
 #include "base/trace_event/typed_macros.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_dynamics_compressor_options.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
@@ -13,6 +14,9 @@
 #include "third_party/blink/renderer/platform/audio/dynamics_compressor.h"
 #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include <random>
+#include <string>
+#include <sstream>
 
 namespace blink {
 
@@ -20,6 +24,31 @@ namespace {
 
 // Set output to stereo by default.
 constexpr unsigned kDefaultNumberOfOutputChannels = 2;
+
+// Fingerprint identifiers for different dynamics compressor operations
+constexpr double kStandardFingerprintId = 124.04347527516074;
+constexpr const char* kFullBufferFingerprintId = "a5b57a7aadf52796121947e53afb099d0ed347f8ac05e73b30925f91447ec5f7";
+
+// Helper function to generate deterministic noise from fingerprint ID
+float GenerateNoiseFromFingerprint(double fingerprint_id, float min_val, float max_val) {
+  // Convert fingerprint to seed for deterministic noise generation
+  std::hash<double> hasher;
+  auto seed = static_cast<unsigned>(hasher(fingerprint_id));
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<float> dis(min_val, max_val);
+  return dis(gen);
+}
+
+// Helper function to generate deterministic noise from string fingerprint
+float GenerateNoiseFromFingerprint(const std::string& fingerprint_id, float min_val, float max_val) {
+  // Convert string fingerprint to seed for deterministic noise generation
+  std::hash<std::string> hasher;
+  auto seed = static_cast<unsigned>(hasher(fingerprint_id));
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<float> dis(min_val, max_val);
+  return dis(gen);
+}
+
 
 }  // namespace
 
@@ -68,6 +97,30 @@ void DynamicsCompressorHandler::Process(uint32_t frames_to_process) {
   float ratio = ratio_->FinalValue();
   float attack = attack_->FinalValue();
   float release = release_->FinalValue();
+
+  // Detect operation type and apply corresponding fingerprint-based noise
+  bool is_full_buffer_operation = (frames_to_process == GetDeferredTaskHandler().RenderQuantumFrames());
+  
+  // Apply fingerprint-based noise to prevent consistent fingerprinting
+  if (is_full_buffer_operation) {
+    // Full buffer dynamics compressor - use string fingerprint ID
+    float noise_threshold = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
+    float noise_knee = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.001f, 0.001f);
+    float noise_ratio = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
+    
+    threshold += noise_threshold;
+    knee += noise_knee;
+    ratio += noise_ratio;
+  } else {
+    // Standard dynamics compressor - use numeric fingerprint ID
+    float noise_threshold = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
+    float noise_knee = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.001f, 0.001f);
+    float noise_ratio = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
+    
+    threshold += noise_threshold;
+    knee += noise_knee;
+    ratio += noise_ratio;
+  }
 
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
               "DynamicsCompressorHandler::Process", "this",

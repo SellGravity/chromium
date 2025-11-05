@@ -14,6 +14,7 @@ blink_modules_sources("webaudio") {
     "audio_buffer.h",
     "audio_buffer_source_handler.cc",
     "audio_buffer_source_handler.h",
+    "audio_noise_generator.h",
     "audio_buffer_source_node.cc",
     "audio_buffer_source_node.h",
     "audio_context.cc",

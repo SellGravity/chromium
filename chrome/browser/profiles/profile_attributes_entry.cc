@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/command_line.h"
 #include "base/hash/hash.h"
 #include "base/logging.h"
 #include "base/notreached.h"
@@ -22,6 +23,7 @@
 #include "chrome/browser/profiles/profiles_state.h"
 #include "chrome/browser/signin/signin_util.h"
 #include "chrome/browser/ui/profiles/profile_colors_util.h"
+#include "chrome/common/chrome_switches.h"
 #include "chrome/common/pref_names.h"
 #include "components/policy/core/browser/browser_policy_connector.h"
 #include "components/prefs/pref_registry_simple.h"
@@ -347,6 +349,17 @@ NameForm ProfileAttributesEntry::GetNameForm() const {
 }
 
 std::u16string ProfileAttributesEntry::GetName() const {
+  // Check for command-line override first
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch(switches::kProfileName)) {
+    std::string profile_name =
+        command_line->GetSwitchValueASCII(switches::kProfileName);
+    if (!profile_name.empty()) {
+      return base::UTF8ToUTF16(profile_name);
+    }
+  }
+
+  // Use default profile name logic
   switch (GetNameForm()) {
     case NameForm::kGaiaName:
       return GetGAIANameToDisplay();

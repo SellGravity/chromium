@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(taskkill:*)",
-      "Bash(nul)"
+      "Bash(nul)",
+      "Bash(autoninja:*)",
+      "Bash(cmd /c \"taskkill /F /IM chrome.exe /T\")"
     ],
     "deny": [],
     "ask": []

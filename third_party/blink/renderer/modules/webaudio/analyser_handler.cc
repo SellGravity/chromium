@@ -4,12 +4,15 @@
 
 #include "third_party/blink/renderer/modules/webaudio/analyser_handler.h"
 
+#include "base/command_line.h"
+#include "third_party/blink/renderer/modules/webaudio/audio_noise_generator.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_input.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_output.h"
 #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
 #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+#include <algorithm>
 
 namespace blink {
 
@@ -214,6 +217,50 @@ void AnalyserHandler::CheckNumberOfChannelsForInput(AudioNodeInput* input) {
   AudioHandler::CheckNumberOfChannelsForInput(input);
 
   Context()->GetDeferredTaskHandler().UpdatePullStatusWithFeatureCheck(this);
+}
+
+// Helper function to apply fingerprinting noise to frequency data
+void AnalyserHandler::ApplyFrequencyDataNoise(DOMUint8Array* frequency_data) {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (!command_line || !command_line->HasSwitch("audio-noise")) {
+    return;
+  }
+
+  AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
+
+  uint8_t* data = frequency_data->Data();
+  size_t length = frequency_data->length();
+
+  if (data && length > 0) {
+    for (size_t i = 0; i < length; ++i) {
+      int noised = static_cast<int>(data[i]) + noise_gen.GetNoiseInt(-3, 3);
+      // Clamp to [0, 255]
+      data[i] = static_cast<uint8_t>(
+          std::max(0, std::min(255, noised)));
+    }
+  }
+}
+
+// Helper function to apply fingerprinting noise to time domain data
+void AnalyserHandler::ApplyTimeDomainNoise(DOMUint8Array* time_domain_data) {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (!command_line || !command_line->HasSwitch("audio-noise")) {
+    return;
+  }
+
+  AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
+
+  uint8_t* data = time_domain_data->Data();
+  size_t length = time_domain_data->length();
+
+  if (data && length > 0) {
+    for (size_t i = 0; i < length; ++i) {
+      int noised = static_cast<int>(data[i]) + noise_gen.GetNoiseInt(-2, 2);
+      // Clamp to [0, 255]
+      data[i] = static_cast<uint8_t>(
+          std::max(0, std::min(255, noised)));
+    }
+  }
 }
 
 }  // namespace blink

@@ -64,6 +64,12 @@ class WebGLDebugRendererInfo final : public WebGLExtension {
   static std::string GetCanvasNoiseOverride();
   static std::string GetCanvasSeedOverride();
 
+  // ==================== Fingerprinting Protection Flags ====================
+  // Static methods to check if specific fingerprinting protections are enabled
+  static bool GetRectsNoiseFlag();   // --rects-noise flag
+  static bool GetAudioNoiseFlag();   // --audio-noise flag
+  static bool GetFontsNoiseFlag();   // --fonts-noise flag
+
 
   static bool Supported(WebGLRenderingContextBase*);
   static const char* ExtensionName();

@@ -108,4 +108,24 @@ std::string WebGLDebugRendererInfo::GetCanvasSeedOverride() {
   return std::string();
 }
 
+// ==================== Fingerprinting Protection Flags ====================
+
+// Static method to check if Rects noise is enabled
+bool WebGLDebugRendererInfo::GetRectsNoiseFlag() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  return command_line && command_line->HasSwitch("rects-noise");
+}
+
+// Static method to check if Audio noise is enabled
+bool WebGLDebugRendererInfo::GetAudioNoiseFlag() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  return command_line && command_line->HasSwitch("audio-noise");
+}
+
+// Static method to check if Fonts noise is enabled
+bool WebGLDebugRendererInfo::GetFontsNoiseFlag() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  return command_line && command_line->HasSwitch("fonts-noise");
+}
+
 }  // namespace blink

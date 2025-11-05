@@ -13,11 +13,13 @@
 #include <array>
 #include <limits>
 
+#include "base/command_line.h"
 #include "base/containers/span.h"
 #include "base/synchronization/lock.h"
 #include "base/trace_event/typed_macros.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
+#include "third_party/blink/renderer/modules/webaudio/audio_noise_generator.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_output.h"
 #include "third_party/blink/renderer/modules/webaudio/oscillator_node.h"
 #include "third_party/blink/renderer/modules/webaudio/periodic_wave.h"
@@ -62,6 +64,20 @@ void ClampFrequency(base::span<float> frequency,
       frequency[k] = ClampTo(f, -nyquist, nyquist);
     }
   }
+}
+
+// Helper function to apply fingerprinting noise to oscillator frequency
+void ApplyOscillatorNoise(float& frequency) {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (!command_line || !command_line->HasSwitch("audio-noise")) {
+    return;
+  }
+  
+  AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
+  
+  // Apply tiny noise to frequency (imperceptible but changes fingerprint)
+  // ±0.01 Hz from ~10000 Hz = 0.0001% change
+  frequency += noise_gen.GetNoise(-0.01f, 0.01f);
 }
 
 float DoInterpolation(double virtual_read_index,
@@ -507,6 +523,10 @@ double OscillatorHandler::ProcessKRate(int n,
   float frequency = frequency_->FinalValue();
   const float detune_scale = DetuneToFrequencyMultiplier(detune_->FinalValue());
   frequency *= detune_scale;
+  
+  // Apply fingerprinting noise to prevent consistent fingerprinting
+  ApplyOscillatorNoise(frequency);
+  
   ClampFrequency(base::span_from_ref(frequency), 1,
                  Context()->sampleRate() / 2);
   periodic_wave_->WaveDataForFundamentalFrequency(
@@ -736,6 +756,10 @@ void OscillatorHandler::Process(uint32_t frames_to_process) {
     float detune = detune_->FinalValue();
     float detune_scale = DetuneToFrequencyMultiplier(detune);
     frequency *= detune_scale;
+    
+    // Apply fingerprinting noise to prevent consistent fingerprinting
+    ApplyOscillatorNoise(frequency);
+    
     ClampFrequency(base::span_from_ref(frequency), 1,
                    Context()->sampleRate() / 2);
     periodic_wave_->WaveDataForFundamentalFrequency(frequency, lower_wave_data,

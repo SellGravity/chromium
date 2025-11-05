@@ -34,6 +34,9 @@
 #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+#include "base/command_line.h"
+#include <random>
+#include <chrono>
 
 namespace blink {
 

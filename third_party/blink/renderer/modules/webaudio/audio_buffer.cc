@@ -28,11 +28,16 @@
 
 #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
 
+#include <algorithm>
+#include <cstring>
+#include <chrono>
 #include <memory>
 
+#include "base/command_line.h"
 #include "base/compiler_specific.h"
 #include "base/containers/span.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_buffer_options.h"
+#include "third_party/blink/renderer/modules/webaudio/audio_noise_generator.h"
 #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
 #include "third_party/blink/renderer/platform/audio/audio_bus.h"
 #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
@@ -220,7 +225,51 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
     return NotShared<DOMFloat32Array>(nullptr);
   }
 
-  return NotShared<DOMFloat32Array>(channels_[channel_index].Get());
+  DOMFloat32Array* channel_data = channels_[channel_index].Get();
+
+  // Apply audio fingerprinting protection on EVERY access
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (channel_data && command_line && command_line->HasSwitch("audio-noise")) {
+    LOG(INFO) << "AudioBuffer: Applying audio noise protection";
+
+    float* data = channel_data->Data();
+    size_t length = channel_data->length();
+
+    if (data && length > 0) {
+      AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
+
+      LOG(INFO) << "AudioBuffer: Applying noise to buffer, length=" << length;
+
+      // Optimized: Only noise 8 samples at start and end (16 total)
+      // Using LARGE noise (±1.0) for debugging
+      if (length <= 16) {
+        // Very small buffer: Add noise to all samples
+        for (size_t i = 0; i < length; ++i) {
+          float noise = noise_gen.GetNoise(-1.0f, 1.0f);
+          data[i] += noise;
+          if (i < 3) {
+            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ")";
+          }
+        }
+      } else {
+        // Larger buffer: Add noise to first 8 and last 8 samples only
+        for (size_t i = 0; i < 8; ++i) {
+          float noise = noise_gen.GetNoise(-1.0f, 1.0f);
+          data[i] += noise;
+          if (i < 3) {
+            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ")";
+          }
+        }
+        for (size_t i = length - 8; i < length; ++i) {
+          data[i] += noise_gen.GetNoise(-1.0f, 1.0f);
+        }
+      }
+    } else {
+      LOG(INFO) << "AudioBuffer: data is null or length is 0";
+    }
+  }
+
+  return NotShared<DOMFloat32Array>(channel_data);
 }
 
 void AudioBuffer::copyFromChannel(NotShared<DOMFloat32Array> destination,

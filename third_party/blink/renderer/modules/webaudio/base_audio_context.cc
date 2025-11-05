@@ -27,6 +27,7 @@
 
 #include <algorithm>
 
+#include "base/command_line.h"
 #include "base/metrics/histogram_functions.h"
 #include "build/build_config.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink.h"

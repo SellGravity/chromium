@@ -923,6 +923,18 @@ std::u16string Browser::GetWindowTitleFromWebContents(
     title = CoreTabHelper::GetDefaultTitle();
   }
 
+  // Append custom profile name if --profile-name is set
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch(switches::kProfileName)) {
+    std::string profile_name =
+        command_line->GetSwitchValueASCII(switches::kProfileName);
+    if (!profile_name.empty()) {
+      std::u16string profile_name_u16 = base::UTF8ToUTF16(profile_name);
+      title = title.empty() ? profile_name_u16
+                            : title + u" - " + profile_name_u16;
+    }
+  }
+
 #if BUILDFLAG(IS_MAC)
   // On Mac, we don't want to suffix the page title with the application name.
   return title;

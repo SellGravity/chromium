@@ -56,20 +56,19 @@ class CORE_EXPORT TextMetrics final : public ScriptWrappable {
               const String& text,
               PlainTextPainter& text_painter);
 
-  double width() const { return width_; }
-  double actualBoundingBoxLeft() const { return actual_bounding_box_left_; }
-  double actualBoundingBoxRight() const { return actual_bounding_box_right_; }
-  double fontBoundingBoxAscent() const { return font_bounding_box_ascent_; }
-  double fontBoundingBoxDescent() const { return font_bounding_box_descent_; }
-  double actualBoundingBoxAscent() const { return actual_bounding_box_ascent_; }
+  // Getters with optional noise for font fingerprinting protection
+  double width() const;
+  double actualBoundingBoxLeft() const;
+  double actualBoundingBoxRight() const;
+  double fontBoundingBoxAscent() const;
+  double fontBoundingBoxDescent() const;
+  double actualBoundingBoxAscent() const;
   double alphabeticBaseline() const { return baselines_->alphabetic(); }
   double hangingBaseline() const { return baselines_->hanging(); }
   double ideographicBaseline() const { return baselines_->ideographic(); }
-  double actualBoundingBoxDescent() const {
-    return actual_bounding_box_descent_;
-  }
-  double emHeightAscent() const { return em_height_ascent_; }
-  double emHeightDescent() const { return em_height_descent_; }
+  double actualBoundingBoxDescent() const;
+  double emHeightAscent() const;
+  double emHeightDescent() const;
 
   static float GetFontBaseline(const V8CanvasTextBaseline::Enum,
                                const SimpleFontData&);

@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 
 #include "base/gtest_prod_util.h"
 #include "third_party/blink/renderer/modules/modules_export.h"

@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/core/html/canvas/text_metrics.h"
 
+#include "base/command_line.h"
 #include "base/numerics/checked_math.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_align.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_baseline.h"
@@ -20,12 +21,28 @@
 #include "third_party/blink/renderer/platform/fonts/shaping/shape_result.h"
 #include "third_party/blink/renderer/platform/fonts/shaping/shape_result_view.h"
 #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 #include "third_party/blink/renderer/platform/text/text_direction.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_view.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
 
 namespace blink {
+
+namespace {
+// Helper to apply fonts noise if the --fonts-noise flag is enabled
+double ApplyFontsNoise(double value) {
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (!command_line || !command_line->HasSwitch("fonts-noise")) {
+    return value;
+  }
+
+  // Use session cache with smaller noise range for fonts
+  double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(
+      value, -0.5, 0.5);
+  return value + noise;
+}
+}  // namespace
 
 constexpr int kHangingAsPercentOfAscent = 80;
 
@@ -596,6 +613,43 @@ unsigned TextMetrics::CorrectForMixedBidi(
     }
   }
   return run_offset + riter->character_offset_;
+}
+
+// TextMetrics getter implementations with fingerprinting protection
+double TextMetrics::width() const {
+  return ApplyFontsNoise(width_);
+}
+
+double TextMetrics::actualBoundingBoxLeft() const {
+  return ApplyFontsNoise(actual_bounding_box_left_);
+}
+
+double TextMetrics::actualBoundingBoxRight() const {
+  return ApplyFontsNoise(actual_bounding_box_right_);
+}
+
+double TextMetrics::fontBoundingBoxAscent() const {
+  return ApplyFontsNoise(font_bounding_box_ascent_);
+}
+
+double TextMetrics::fontBoundingBoxDescent() const {
+  return ApplyFontsNoise(font_bounding_box_descent_);
+}
+
+double TextMetrics::actualBoundingBoxAscent() const {
+  return ApplyFontsNoise(actual_bounding_box_ascent_);
+}
+
+double TextMetrics::actualBoundingBoxDescent() const {
+  return ApplyFontsNoise(actual_bounding_box_descent_);
+}
+
+double TextMetrics::emHeightAscent() const {
+  return ApplyFontsNoise(em_height_ascent_);
+}
+
+double TextMetrics::emHeightDescent() const {
+  return ApplyFontsNoise(em_height_descent_);
 }
 
 }  // namespace blink
