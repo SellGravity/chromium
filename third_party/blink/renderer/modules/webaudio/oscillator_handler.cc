@@ -74,10 +74,11 @@ void ApplyOscillatorNoise(float& frequency) {
   }
   
   AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
-  
+
   // Apply tiny noise to frequency (imperceptible but changes fingerprint)
   // ±0.01 Hz from ~10000 Hz = 0.0001% change
-  frequency += noise_gen.GetNoise(-0.01f, 0.01f);
+  // ✅ Use frequency value as cache key for deterministic noise
+  frequency += noise_gen.GetNoise(frequency, -0.01f, 0.01f);
 }
 
 float DoInterpolation(double virtual_read_index,

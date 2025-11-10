@@ -138,12 +138,15 @@
 #include <random>
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkImage.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 
 namespace blink {
 
 namespace {
 
 // Helper: Apply canvas noise by creating a NEW modified StaticBitmapImage
+// Uses SessionNoiseCache for deterministic, cached noise values
+// Same pixel value + channel gets same noise across calls in the session
 // Returns a new image with noise applied, or nullptr on failure
 scoped_refptr<StaticBitmapImage> CreateNoisedImage(
     scoped_refptr<StaticBitmapImage> source_image,
@@ -152,17 +155,9 @@ scoped_refptr<StaticBitmapImage> CreateNoisedImage(
     return nullptr;
   }
 
-  // Generate seed for random noise
-  uint32_t seed = 0;
-  if (!seed_str.empty()) {
-    std::hash<std::string> hasher;
-    seed = hasher(seed_str) & 0xFFFFFFFF;
-  } else {
-    seed = static_cast<uint32_t>(std::time(nullptr));
-  }
-
-  std::mt19937 gen(seed);
-  std::uniform_int_distribution<int> dis(-3, 3);
+  // SessionNoiseCache provides deterministic noise per session
+  // No need for manual seed generation - cache handles it internally
+  // Note: seed_str parameter kept for backward compatibility but not used
 
   // Get source SkImage
   PaintImage paint_image = source_image->PaintImageForCurrentFrame();
@@ -196,14 +191,23 @@ scoped_refptr<StaticBitmapImage> CreateNoisedImage(
   size_t pixel_count = bitmap.width() * bitmap.height();
   int bytes_per_pixel = bitmap.bytesPerPixel();
 
+  // Use SessionNoiseCache for deterministic, cached noise
+  // Cache key = pixel_value * 10 + channel (0=R, 1=G, 2=B)
+  // This ensures same pixel value + channel gets same noise
   for (size_t i = 0; i < pixel_count; ++i) {
     size_t byte_index = i * bytes_per_pixel;
 
     // Add noise to RGB channels (skip alpha channel)
     for (int channel = 0; channel < 3 && channel < bytes_per_pixel; ++channel) {
-      int noise = dis(gen);
-      int current_value = pixels[byte_index + channel];
-      int new_value = current_value + noise;
+      double current_value = static_cast<double>(pixels[byte_index + channel]);
+
+      // ✅ Cache key combines pixel value and channel
+      // Same color value in same channel always gets same noise
+      double cache_key = current_value * 10.0 + channel;
+      double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(
+          cache_key, -3.0, 3.0);
+
+      int new_value = static_cast<int>(current_value + noise);
       // Clamp to [0, 255]
       pixels[byte_index + channel] = static_cast<uint8_t>(
           std::max(0, std::min(255, new_value)));
@@ -227,8 +231,8 @@ scoped_refptr<StaticBitmapImage> CreateNoisedImage(
       StaticBitmapImage::Create(std::move(noised_paint_image), source_image->Orientation());
 
   if (noised_image) {
-    DVLOG(1) << "Canvas noise applied successfully with seed: " << seed
-             << " to " << pixel_count << " pixels";
+    DVLOG(1) << "Canvas noise applied successfully using SessionNoiseCache to "
+             << pixel_count << " pixels (deterministic & cached)";
   }
 
   return noised_image;

@@ -245,23 +245,26 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
       if (length <= 16) {
         // Very small buffer: Add noise to all samples
         for (size_t i = 0; i < length; ++i) {
-          float noise = noise_gen.GetNoise(-1.0f, 1.0f);
+          // ✅ Use sample value as cache key for deterministic noise
+          float noise = noise_gen.GetNoise(data[i], -1.0f, 1.0f);
           data[i] += noise;
           if (i < 3) {
-            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ")";
+            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ", cached)";
           }
         }
       } else {
         // Larger buffer: Add noise to first 8 and last 8 samples only
         for (size_t i = 0; i < 8; ++i) {
-          float noise = noise_gen.GetNoise(-1.0f, 1.0f);
+          // ✅ Use sample value as cache key
+          float noise = noise_gen.GetNoise(data[i], -1.0f, 1.0f);
           data[i] += noise;
           if (i < 3) {
-            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ")";
+            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ", cached)";
           }
         }
         for (size_t i = length - 8; i < length; ++i) {
-          data[i] += noise_gen.GetNoise(-1.0f, 1.0f);
+          // ✅ Use sample value as cache key
+          data[i] += noise_gen.GetNoise(data[i], -1.0f, 1.0f);
         }
       }
     } else {

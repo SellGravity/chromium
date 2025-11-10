@@ -233,7 +233,9 @@ void AnalyserHandler::ApplyFrequencyDataNoise(DOMUint8Array* frequency_data) {
 
   if (data && length > 0) {
     for (size_t i = 0; i < length; ++i) {
-      int noised = static_cast<int>(data[i]) + noise_gen.GetNoiseInt(-3, 3);
+      // ✅ Use data value as cache key for deterministic noise
+      int noise = noise_gen.GetNoiseInt(data[i], -3, 3);
+      int noised = static_cast<int>(data[i]) + noise;
       // Clamp to [0, 255]
       data[i] = static_cast<uint8_t>(
           std::max(0, std::min(255, noised)));
@@ -255,7 +257,9 @@ void AnalyserHandler::ApplyTimeDomainNoise(DOMUint8Array* time_domain_data) {
 
   if (data && length > 0) {
     for (size_t i = 0; i < length; ++i) {
-      int noised = static_cast<int>(data[i]) + noise_gen.GetNoiseInt(-2, 2);
+      // ✅ Use data value as cache key for deterministic noise
+      int noise = noise_gen.GetNoiseInt(data[i], -2, 2);
+      int noised = static_cast<int>(data[i]) + noise;
       // Clamp to [0, 255]
       data[i] = static_cast<uint8_t>(
           std::max(0, std::min(255, noised)));

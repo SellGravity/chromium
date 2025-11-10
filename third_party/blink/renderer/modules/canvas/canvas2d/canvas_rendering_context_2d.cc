@@ -135,8 +135,6 @@
 // IWYU pragma: no_include <atomic>
 // IWYU pragma: no_include "base/metrics/histogram_base.h"
 #include "gpu/config/gpu_switches.h"
-#include "third_party/blink/renderer/modules/canvas/canvas_device_profile.h"
-#include "third_party/blink/renderer/modules/canvas/canvas_content_generator.h"
 
 
 namespace base {

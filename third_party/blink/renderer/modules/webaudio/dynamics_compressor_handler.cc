@@ -98,28 +98,31 @@ void DynamicsCompressorHandler::Process(uint32_t frames_to_process) {
   float attack = attack_->FinalValue();
   float release = release_->FinalValue();
 
-  // Detect operation type and apply corresponding fingerprint-based noise
-  bool is_full_buffer_operation = (frames_to_process == GetDeferredTaskHandler().RenderQuantumFrames());
-  
-  // Apply fingerprint-based noise to prevent consistent fingerprinting
-  if (is_full_buffer_operation) {
-    // Full buffer dynamics compressor - use string fingerprint ID
-    float noise_threshold = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
-    float noise_knee = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.001f, 0.001f);
-    float noise_ratio = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
-    
-    threshold += noise_threshold;
-    knee += noise_knee;
-    ratio += noise_ratio;
-  } else {
-    // Standard dynamics compressor - use numeric fingerprint ID
-    float noise_threshold = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
-    float noise_knee = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.001f, 0.001f);
-    float noise_ratio = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
-    
-    threshold += noise_threshold;
-    knee += noise_knee;
-    ratio += noise_ratio;
+  // Apply fingerprint-based noise only if audio-noise flag is enabled
+  auto* cmd = base::CommandLine::ForCurrentProcess();
+  if (cmd && cmd->HasSwitch("audio-noise")) {
+    // Detect operation type and apply corresponding fingerprint-based noise
+    bool is_full_buffer_operation = (frames_to_process == GetDeferredTaskHandler().RenderQuantumFrames());
+
+    if (is_full_buffer_operation) {
+      // Full buffer dynamics compressor - use string fingerprint ID
+      float noise_threshold = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
+      float noise_knee = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.001f, 0.001f);
+      float noise_ratio = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
+
+      threshold += noise_threshold;
+      knee += noise_knee;
+      ratio += noise_ratio;
+    } else {
+      // Standard dynamics compressor - use numeric fingerprint ID
+      float noise_threshold = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
+      float noise_knee = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.001f, 0.001f);
+      float noise_ratio = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
+
+      threshold += noise_threshold;
+      knee += noise_knee;
+      ratio += noise_ratio;
+    }
   }
 
   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
