@@ -4312,6 +4312,16 @@ inline constexpr char kNonMilestoneUpdateToastVersion[] =
     "toast.non_milestone_update_toast_version";
 #endif  // !BUILDFLAG(IS_ANDROID)
 
+// Fingerprinting protection noise seeds (per-profile persistence)
+// Canvas noise seed - persisted across browser restarts
+inline constexpr char kCanvasNoiseSeed[] = "fingerprinting.canvas_noise_seed";
+
+// Audio noise seed - persisted across browser restarts
+inline constexpr char kAudioNoiseSeed[] = "fingerprinting.audio_noise_seed";
+
+// Rects noise seed - persisted across browser restarts
+inline constexpr char kRectsNoiseSeed[] = "fingerprinting.rects_noise_seed";
+
 }  // namespace prefs
 
 #endif  // CHROME_COMMON_PREF_NAMES_H_

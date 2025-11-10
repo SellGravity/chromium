@@ -407,6 +407,11 @@ void Profile::RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
 
   registry->RegisterListPref(prefs::kAutoLaunchProtocolsFromOrigins);
 
+  // Fingerprinting protection noise seeds (per-profile persistence)
+  registry->RegisterUint64Pref(prefs::kCanvasNoiseSeed, 0);
+  registry->RegisterUint64Pref(prefs::kAudioNoiseSeed, 0);
+  registry->RegisterUint64Pref(prefs::kRectsNoiseSeed, 0);
+
   // Instead of registering new prefs here, please create a static method and
   // invoke it from RegisterProfilePrefs() in
   // chrome/browser/prefs/browser_prefs.cc.

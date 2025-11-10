@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <set>
 #include <string_view>
 #include <tuple>
@@ -2738,6 +2739,22 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
       Profile* profile =
           Profile::FromBrowserContext(process->GetBrowserContext());
       PrefService* prefs = profile->GetPrefs();
+
+      // Fingerprinting protection: Canvas noise seed persistence
+      if (browser_command_line.HasSwitch("canvas-noise")) {
+        uint64_t canvas_seed = prefs->GetUint64(prefs::kCanvasNoiseSeed);
+        if (canvas_seed == 0) {
+          // Generate new seed and save to profile
+          std::random_device rd;
+          std::mt19937_64 gen(rd());
+          std::uniform_int_distribution<uint64_t> dis;
+          canvas_seed = dis(gen);
+          prefs->SetUint64(prefs::kCanvasNoiseSeed, canvas_seed);
+        }
+        // Pass seed to renderer
+        command_line->AppendSwitchASCII("canvas-seed",
+                                        base::NumberToString(canvas_seed));
+      }
       // Currently this pref is only registered if applied via a policy.
       if (prefs->HasPrefPath(prefs::kDisable3DAPIs) &&
           prefs->GetBoolean(prefs::kDisable3DAPIs)) {

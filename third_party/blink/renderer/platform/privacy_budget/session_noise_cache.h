@@ -8,7 +8,9 @@
 #include <chrono>
 #include <random>
 
+#include "base/command_line.h"
 #include "base/no_destructor.h"
+#include "base/strings/string_number_conversions.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
 
 namespace blink {
@@ -65,7 +67,17 @@ class SessionNoiseCache {
   friend class base::NoDestructor<SessionNoiseCache>;
 
   SessionNoiseCache() {
-    // Initialize session seed once at startup
+    // Try to use profile-persisted seed from --canvas-seed flag
+    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+    if (command_line && command_line->HasSwitch("canvas-seed")) {
+      std::string seed_str = command_line->GetSwitchValueASCII("canvas-seed");
+      if (base::StringToUint64(seed_str, &session_seed_) && session_seed_ != 0) {
+        // Successfully loaded profile seed - noise will be deterministic!
+        return;
+      }
+    }
+
+    // Fallback: Initialize session seed once at startup from timestamp
     session_seed_ = static_cast<uint64_t>(
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
   }
