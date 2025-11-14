@@ -759,11 +759,7 @@ ImageData* CanvasRenderingContext2D::getImageDataInternal(
           CanvasContextCreationAttributesCore::WillReadFrequently::kTrue);
 
   ImageData* image_data = BaseRenderingContext2D::getImageDataInternal(
-      sx, sy, sw, sh, image_data_settings, exception_state);
-  
-  // TODO: Add noise application once pixel buffer access is properly exposed
-  // Currently unable to access pixel data due to WebIDL union type limitations
-  
+      sx, sy, sw, sh, image_data_settings, exception_state);  
   return image_data;
 }
 

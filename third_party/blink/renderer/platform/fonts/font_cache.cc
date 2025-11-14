@@ -32,6 +32,7 @@
 #include <limits>
 #include <memory>
 
+#include "base/command_line.h"
 #include "base/debug/alias.h"
 #include "base/feature_list.h"
 #include "base/notreached.h"
@@ -66,12 +67,89 @@
 #include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 #include "ui/gfx/font_list.h"
-
+#include "base/strings/string_split.h"
 #if BUILDFLAG(IS_WIN)
 #include "third_party/skia/include/ports/SkTypeface_win.h"
 #endif
 
 namespace blink {
+
+namespace {
+
+const char* kDefaultFonts[] = {
+  // Original 33
+  "arial", "times new roman", "courier new", "verdana",
+  "georgia", "tahoma", "trebuchet ms", "comic sans ms",
+  "impact", "consolas", "calibri", "cambria", "segoe ui",
+  "lucida sans unicode", "lucida console", "palatino linotype",
+  "garamond", "lucida grande", "ms gothic", "ms mincho",
+  "ms pgothic", "ms pmincho", "gill sans", "helvetica",
+  "helvetica neue", "monaco", "courier", "times",
+  "palatino", "ms serif", "serif", "sans-serif",
+  
+  // NEW: Chỉ fonts có sẵn trên hầu hết Windows
+  "arial black", "arial narrow", "arial unicode ms",
+  "book antiqua", "bookman old style", "candara",
+  "century", "century gothic", "century schoolbook",
+  "corbel", "desdemona", "ebrima",
+  "estrangelo edessa", "euphemia", "fernandez",
+  "franklin gothic medium", "garamond", "gautami",
+  "georgia pro", "gisha", "gulim",
+  "gurmukhi", "hagulim", "harlow solid italic",
+  "heroic", "hidden",
+  "impact", "informal roman", "informal",
+  "iskoola pota", "javanese",
+};
+
+
+bool IsWhitelistedFont(const AtomicString& family) {
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  
+  // Step 1: Convert family to lowercase
+  std::string family_lower = family.Utf8().data();
+  std::transform(family_lower.begin(), family_lower.end(), 
+                 family_lower.begin(), ::tolower);
+  
+  // Step 2: Check against default 33 fonts
+  for (const char* font : kDefaultFonts) {
+    if (family_lower.find(font) != std::string::npos) {
+      return true;  // Found in default 33
+    }
+  }
+  
+  // Step 3: Check CLI additional fonts
+  if (command_line && command_line->HasSwitch("fonts-whitelist")) {
+    std::string cli_fonts_str = command_line->GetSwitchValueASCII("fonts-whitelist");
+    
+    if (!cli_fonts_str.empty()) {
+      // Parse CLI fonts
+      std::vector<std::string> cli_fonts = base::SplitString(
+          cli_fonts_str, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+      
+      // Check if family matches any CLI font
+      for (const auto& font : cli_fonts) {
+        std::string font_lower = font;
+        std::transform(font_lower.begin(), font_lower.end(), 
+                       font_lower.begin(), ::tolower);
+        
+        if (family_lower.find(font_lower) != std::string::npos) {
+          return true;  // Found in CLI fonts
+        }
+      }
+    }
+  }
+  
+  // Not found in default 33 or CLI → block it
+  static int count = 0;
+  if (++count <= 20) {
+    LOG(INFO) << "[FONT-WHITELIST] Blocked: " << family
+              << " (default 33 + CLI fonts allowed)";
+  }
+  
+  return false;
+}
+
+}  // namespace
 
 const char kColorEmojiLocale[] = "und-Zsye";
 const char kMonoEmojiLocale[] = "und-Zsym";
@@ -166,6 +244,12 @@ const SimpleFontData* FontCache::GetFontData(
     const FontDescription& font_description,
     const AtomicString& family,
     AlternateFontName altername_font_name) {
+  // FONT WHITELISTING: Block non-whitelisted fonts to prevent fingerprinting
+  if (!IsWhitelistedFont(family)) {
+    // Return nullptr to force fallback to generic font
+    return nullptr;
+  }
+
   if (const FontPlatformData* platform_data = GetFontPlatformData(
           font_description,
           FontFaceCreationParams(

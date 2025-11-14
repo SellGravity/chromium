@@ -118,7 +118,8 @@ bool LocationIconView::ShouldShowSeparator() const {
   return false;
 }
 bool LocationIconView::ShouldShowLabel() const {
-  return true;
+  // Always hide label to remove whitespace
+  return false;
 }
 bool LocationIconView::ShouldShowLabelAfterAnimation() const {
   return ShouldShowLabel();
@@ -190,6 +191,11 @@ int LocationIconView::GetMinimumLabelTextWidth() const {
 }
 
 bool LocationIconView::GetShowText() const {
+  // Always hide text in location icon view
+  return false;
+
+  // Original code commented out
+  /*
   if (delegate_->IsEditingOrEmpty()) {
     return false;
   }
@@ -204,6 +210,7 @@ bool LocationIconView::GetShowText() const {
   }
 
   return !location_bar_model->GetSecureDisplayText().empty();
+  */
 }
 
 const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
@@ -211,11 +218,12 @@ const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
 }
 namespace {
 
-// Helper function to get current profile name
+// Helper function to get current profile name - COMMENTED OUT (unused)
+/*
 std::u16string GetCurrentProfileName() {
   // Lấy last used profile
   Profile* profile = ProfileManager::GetLastUsedProfileIfLoaded();
-  
+
   if (!profile) {
     // Nếu không lấy được profile, return empty string
     return std::u16string();
@@ -229,26 +237,32 @@ std::u16string GetCurrentProfileName() {
 
   // Lấy ProfileAttributesStorage để truy cập profile attributes
   ProfileAttributesStorage& storage = manager->GetProfileAttributesStorage();
-  
+
   // Lấy profile path
   base::FilePath profile_path = profile->GetPath();
-  
+
   // Lấy ProfileAttributesEntry cho profile này
   ProfileAttributesEntry* entry = storage.GetProfileAttributesWithPath(profile_path);
-  
+
   if (!entry) {
     return std::u16string();
   }
 
   // Lấy profile name (display name)
   std::u16string profile_name = entry->GetName();
-  
+
   return profile_name;
 }
+*/
 
 }  // namespace
 std::u16string LocationIconView::GetText() const {
-    std::u16string profile_name = GetCurrentProfileName();
+  // Always return empty string to hide all text (including profile name)
+  return std::u16string();
+
+  // Original code commented out to hide profile name and all other text
+  /*
+  std::u16string profile_name = GetCurrentProfileName();
   if (!profile_name.empty()) {
     return profile_name;
   }
@@ -284,8 +298,9 @@ std::u16string LocationIconView::GetText() const {
       return extension_name;
     }
   }
-return u"Qkhai";
+  return u"Qkhai";
   // return delegate_->GetLocationBarModel()->GetSecureDisplayText();
+  */
 }
 
 bool LocationIconView::GetAnimateTextVisibilityChange() const {
@@ -494,6 +509,10 @@ void LocationIconView::UpdateBorder() {
 
 gfx::Size LocationIconView::GetMinimumSizeForPreferredSize(
     gfx::Size size) const {
+  // Don't enforce minimum size when label is hidden
+  if (!ShouldShowLabel()) {
+    return gfx::Size(0, size.height());
+  }
   const int kMinCharacters = 10;
   size.SetToMin(
       GetSizeForLabelWidth(font_list().GetExpectedTextWidth(kMinCharacters)));

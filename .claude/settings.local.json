@@ -4,7 +4,8 @@
       "Bash(taskkill:*)",
       "Bash(nul)",
       "Bash(autoninja:*)",
-      "Bash(cmd /c \"taskkill /F /IM chrome.exe /T\")"
+      "Bash(cmd /c \"taskkill /F /IM chrome.exe /T\")",
+      "Bash(cmd /c:*)"
     ],
     "deny": [],
     "ask": []
