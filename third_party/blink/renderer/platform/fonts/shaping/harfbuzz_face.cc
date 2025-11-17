@@ -51,6 +51,7 @@
 #include "third_party/blink/renderer/platform/fonts/shaping/variation_selector_mode.h"
 #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
 #include "third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.h"
+#include "third_party/blink/renderer/platform/fonts/unicode_glyphs_noise_generator.h"
 #include "third_party/blink/renderer/platform/fonts/unicode_range_set.h"
 #include "third_party/blink/renderer/platform/resolution_units.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
@@ -399,6 +400,12 @@ unsigned HarfBuzzFace::UnitsPerEmFromHeadTable() {
 }
 
 Glyph HarfBuzzFace::HbGlyphForCharacter(UChar32 character) {
+  // Apply Unicode Glyphs character coverage spoofing (fingerprinting protection)
+  // Randomly hide some characters to disrupt fingerprinting (~2% false negative rate)
+  if (UnicodeGlyphsNoiseGenerator::GetInstance().ShouldHideCharacter(character)) {
+    return 0;  // Pretend character doesn't exist in this font
+  }
+
   hb_codepoint_t glyph = 0;
   HarfBuzzGetNominalGlyph(harfbuzz_font_data_->unscaled_font_.get(),
                           harfbuzz_font_data_, character, &glyph, nullptr);

@@ -142,8 +142,8 @@ bool IsWhitelistedFont(const AtomicString& family) {
   // Not found in default 33 or CLI → block it
   static int count = 0;
   if (++count <= 20) {
-    LOG(INFO) << "[FONT-WHITELIST] Blocked: " << family
-              << " (default 33 + CLI fonts allowed)";
+    // LOG(INFO) << "[FONT-WHITELIST] Blocked: " << family
+    //           << " (default 33 + CLI fonts allowed)";
   }
   
   return false;

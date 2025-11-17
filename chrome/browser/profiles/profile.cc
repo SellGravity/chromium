@@ -411,6 +411,7 @@ void Profile::RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
   registry->RegisterUint64Pref(prefs::kCanvasNoiseSeed, 0);
   registry->RegisterUint64Pref(prefs::kAudioNoiseSeed, 0);
   registry->RegisterUint64Pref(prefs::kRectsNoiseSeed, 0);
+  registry->RegisterUint64Pref(prefs::kUnicodeGlyphsNoiseSeed, 0);
 
   // Instead of registering new prefs here, please create a static method and
   // invoke it from RegisterProfilePrefs() in

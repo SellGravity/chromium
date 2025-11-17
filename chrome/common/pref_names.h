@@ -4322,6 +4322,9 @@ inline constexpr char kAudioNoiseSeed[] = "fingerprinting.audio_noise_seed";
 // Rects noise seed - persisted across browser restarts
 inline constexpr char kRectsNoiseSeed[] = "fingerprinting.rects_noise_seed";
 
+// Unicode Glyphs noise seed - persisted across browser restarts
+inline constexpr char kUnicodeGlyphsNoiseSeed[] = "fingerprinting.unicode_glyphs_noise_seed";
+
 }  // namespace prefs
 
 #endif  // CHROME_COMMON_PREF_NAMES_H_

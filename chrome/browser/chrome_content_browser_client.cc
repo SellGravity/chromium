@@ -2755,6 +2755,23 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
         command_line->AppendSwitchASCII("canvas-seed",
                                         base::NumberToString(canvas_seed));
       }
+
+      // Fingerprinting protection: Unicode Glyphs noise seed persistence
+      if (browser_command_line.HasSwitch("fonts-noise")) {
+        uint64_t glyphs_seed = prefs->GetUint64(prefs::kUnicodeGlyphsNoiseSeed);
+        if (glyphs_seed == 0) {
+          // Generate new seed and save to profile
+          std::random_device rd;
+          std::mt19937_64 gen(rd());
+          std::uniform_int_distribution<uint64_t> dis;
+          glyphs_seed = dis(gen);
+          prefs->SetUint64(prefs::kUnicodeGlyphsNoiseSeed, glyphs_seed);
+        }
+        // Pass seed to renderer
+        command_line->AppendSwitchASCII("unicode-glyphs-seed",
+                                        base::NumberToString(glyphs_seed));
+      }
+
       // Currently this pref is only registered if applied via a policy.
       if (prefs->HasPrefPath(prefs::kDisable3DAPIs) &&
           prefs->GetBoolean(prefs::kDisable3DAPIs)) {

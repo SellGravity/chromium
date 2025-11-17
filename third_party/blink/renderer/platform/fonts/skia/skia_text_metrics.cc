@@ -7,6 +7,7 @@
 #include "base/containers/span.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.h"
+#include "third_party/blink/renderer/platform/fonts/unicode_glyphs_noise_generator.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/skia/include/core/SkFont.h"
 #include "third_party/skia/include/core/SkPath.h"
@@ -46,7 +47,13 @@ void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
 
   if (!font.isSubpixel())
     sk_width = SkScalarRoundToInt(sk_width);
-  *width = SkiaScalarToHarfBuzzPosition(sk_width);
+
+  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
+  float final_width = SkScalarToFloat(sk_width);
+  final_width = UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
+      final_width, glyph);
+
+  *width = SkiaScalarToHarfBuzzPosition(final_width);
 }
 
 void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
@@ -69,6 +76,14 @@ void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
   if (!font.isSubpixel()) {
     for (unsigned i = 0; i < count; i++)
       sk_width_array[i] = SkScalarRoundToInt(sk_width_array[i]);
+  }
+
+  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
+  for (unsigned i = 0; i < count; i++) {
+    float width = SkScalarToFloat(sk_width_array[i]);
+    width = UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
+        width, glyph_array[i]);
+    sk_width_array[i] = width;
   }
 
   // Copy the results back to the sparse array.
@@ -116,12 +131,24 @@ void SkFontGetGlyphExtentsForHarfBuzz(const SkFont& font,
     sk_bounds.set(sk_bounds.roundOut());
   }
 
+  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
+  auto& noise_gen = UnicodeGlyphsNoiseGenerator::GetInstance();
+  float left = SkScalarToFloat(sk_bounds.fLeft);
+  float top = SkScalarToFloat(sk_bounds.fTop);
+  float width = SkScalarToFloat(sk_bounds.width());
+  float height = SkScalarToFloat(sk_bounds.height());
+
+  left = noise_gen.GetNoisedBounds(left, glyph, 0);
+  top = noise_gen.GetNoisedBounds(top, glyph, 1);
+  width = noise_gen.GetNoisedBounds(width, glyph, 2);
+  height = noise_gen.GetNoisedBounds(height, glyph, 3);
+
   // Invert y-axis because Skia is y-grows-down but we set up HarfBuzz to be
   // y-grows-up.
-  extents->x_bearing = SkiaScalarToHarfBuzzPosition(sk_bounds.fLeft);
-  extents->y_bearing = SkiaScalarToHarfBuzzPosition(-sk_bounds.fTop);
-  extents->width = SkiaScalarToHarfBuzzPosition(sk_bounds.width());
-  extents->height = SkiaScalarToHarfBuzzPosition(-sk_bounds.height());
+  extents->x_bearing = SkiaScalarToHarfBuzzPosition(left);
+  extents->y_bearing = SkiaScalarToHarfBuzzPosition(-top);
+  extents->width = SkiaScalarToHarfBuzzPosition(width);
+  extents->height = SkiaScalarToHarfBuzzPosition(-height);
 }
 
 void SkFontGetBoundsForGlyph(const SkFont& font, Glyph glyph, SkRect* bounds) {
@@ -172,7 +199,12 @@ float SkFontGetWidthForGlyph(const SkFont& font, Glyph glyph) {
   if (!font.isSubpixel())
     sk_width = SkScalarRoundToInt(sk_width);
 
-  return SkScalarToFloat(sk_width);
+  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
+  float final_width = SkScalarToFloat(sk_width);
+  final_width = UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
+      final_width, glyph);
+
+  return final_width;
 }
 
 hb_position_t SkiaScalarToHarfBuzzPosition(SkScalar value) {
