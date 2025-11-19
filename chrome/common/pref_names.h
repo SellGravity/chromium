@@ -4325,6 +4325,11 @@ inline constexpr char kRectsNoiseSeed[] = "fingerprinting.rects_noise_seed";
 // Unicode Glyphs noise seed - persisted across browser restarts
 inline constexpr char kUnicodeGlyphsNoiseSeed[] = "fingerprinting.unicode_glyphs_noise_seed";
 
+// Font substitution mapping - persisted across browser restarts
+// Stores a JSON string mapping source fonts to replacement fonts
+inline constexpr char kFontSubstitutionMapping[] =
+    "fingerprinting.font_substitution_mapping";
+
 }  // namespace prefs
 
 #endif  // CHROME_COMMON_PREF_NAMES_H_

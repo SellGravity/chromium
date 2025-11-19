@@ -2772,6 +2772,59 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
                                         base::NumberToString(glyphs_seed));
       }
 
+      // Fingerprinting protection: Font substitution mapping
+      if (browser_command_line.HasSwitch("fonts-noise")) {
+        std::string mapping_str = prefs->GetString(prefs::kFontSubstitutionMapping);
+
+        if (mapping_str.empty()) {
+          // Generate new font substitution mapping
+          // List of common fonts to choose from
+          static const char* kFontPool[] = {
+              "arial", "times new roman", "courier new", "verdana",
+              "georgia", "tahoma", "trebuchet ms", "comic sans ms",
+              "impact", "consolas", "calibri", "cambria", "segoe ui",
+              "lucida sans unicode", "lucida console", "palatino linotype",
+              "garamond", "lucida grande", "ms gothic", "ms mincho",
+              "ms pgothic", "ms pmincho", "gill sans", "helvetica",
+              "helvetica neue", "monaco", "courier", "times",
+              "palatino", "arial black", "arial narrow", "book antiqua",
+              "bookman old style", "candara", "century", "century gothic",
+              "corbel", "franklin gothic medium"
+          };
+          const size_t kFontPoolSize = std::size(kFontPool);
+
+          // Randomly choose 1-9 fonts to substitute
+          std::random_device rd;
+          std::mt19937 gen(rd());
+          std::uniform_int_distribution<int> num_dis(1, 9);
+          int num_substitutions = num_dis(gen);
+
+          // Shuffle font pool
+          std::vector<size_t> indices;
+          for (size_t i = 0; i < kFontPoolSize; ++i) {
+            indices.push_back(i);
+          }
+          std::shuffle(indices.begin(), indices.end(), gen);
+
+          // Create mappings: source -> target
+          // Format: "source1:target1,source2:target2,..."
+          std::vector<std::string> mappings;
+          for (int i = 0; i < num_substitutions && i * 2 + 1 < static_cast<int>(kFontPoolSize); ++i) {
+            std::string source = kFontPool[indices[i * 2]];
+            std::string target = kFontPool[indices[i * 2 + 1]];
+            mappings.push_back(source + ":" + target);
+          }
+
+          mapping_str = base::JoinString(mappings, ",");
+          prefs->SetString(prefs::kFontSubstitutionMapping, mapping_str);
+        }
+
+        // Pass mapping to renderer
+        if (!mapping_str.empty()) {
+          command_line->AppendSwitchASCII("font-substitution-map", mapping_str);
+        }
+      }
+
       // Currently this pref is only registered if applied via a policy.
       if (prefs->HasPrefPath(prefs::kDisable3DAPIs) &&
           prefs->GetBoolean(prefs::kDisable3DAPIs)) {

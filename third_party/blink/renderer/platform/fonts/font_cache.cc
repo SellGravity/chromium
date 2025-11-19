@@ -76,78 +76,66 @@ namespace blink {
 
 namespace {
 
-const char* kDefaultFonts[] = {
-  // Original 33
-  "arial", "times new roman", "courier new", "verdana",
-  "georgia", "tahoma", "trebuchet ms", "comic sans ms",
-  "impact", "consolas", "calibri", "cambria", "segoe ui",
-  "lucida sans unicode", "lucida console", "palatino linotype",
-  "garamond", "lucida grande", "ms gothic", "ms mincho",
-  "ms pgothic", "ms pmincho", "gill sans", "helvetica",
-  "helvetica neue", "monaco", "courier", "times",
-  "palatino", "ms serif", "serif", "sans-serif",
-  
-  // NEW: Chỉ fonts có sẵn trên hầu hết Windows
-  "arial black", "arial narrow", "arial unicode ms",
-  "book antiqua", "bookman old style", "candara",
-  "century", "century gothic", "century schoolbook",
-  "corbel", "desdemona", "ebrima",
-  "estrangelo edessa", "euphemia", "fernandez",
-  "franklin gothic medium", "garamond", "gautami",
-  "georgia pro", "gisha", "gulim",
-  "gurmukhi", "hagulim", "harlow solid italic",
-  "heroic", "hidden",
-  "impact", "informal roman", "informal",
-  "iskoola pota", "javanese",
-};
-
-
-bool IsWhitelistedFont(const AtomicString& family) {
-  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  
-  // Step 1: Convert family to lowercase
-  std::string family_lower = family.Utf8().data();
-  std::transform(family_lower.begin(), family_lower.end(), 
-                 family_lower.begin(), ::tolower);
-  
-  // Step 2: Check against default 33 fonts
-  for (const char* font : kDefaultFonts) {
-    if (family_lower.find(font) != std::string::npos) {
-      return true;  // Found in default 33
-    }
+// Font substitution cache - parses and caches font mappings from command line
+// This allows per-profile randomized font substitution (1-9 fonts) without
+// blocking all fonts, which would break website rendering.
+class FontSubstitutionCache {
+ public:
+  static FontSubstitutionCache& GetInstance() {
+    static base::NoDestructor<FontSubstitutionCache> instance;
+    return *instance;
   }
-  
-  // Step 3: Check CLI additional fonts
-  if (command_line && command_line->HasSwitch("fonts-whitelist")) {
-    std::string cli_fonts_str = command_line->GetSwitchValueASCII("fonts-whitelist");
-    
-    if (!cli_fonts_str.empty()) {
-      // Parse CLI fonts
-      std::vector<std::string> cli_fonts = base::SplitString(
-          cli_fonts_str, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
-      
-      // Check if family matches any CLI font
-      for (const auto& font : cli_fonts) {
-        std::string font_lower = font;
-        std::transform(font_lower.begin(), font_lower.end(), 
-                       font_lower.begin(), ::tolower);
-        
-        if (family_lower.find(font_lower) != std::string::npos) {
-          return true;  // Found in CLI fonts
+
+  // Get substituted font name if exists, otherwise return original
+  String GetSubstitutedFont(const String& original_font) {
+    String font_lower = original_font.LowerASCII();
+
+    auto it = substitution_map_.find(font_lower);
+    if (it != substitution_map_.end()) {
+      return it->value;
+    }
+    return original_font;  // No substitution needed
+  }
+
+  bool IsInitialized() const { return initialized_; }
+
+  FontSubstitutionCache(const FontSubstitutionCache&) = delete;
+  FontSubstitutionCache& operator=(const FontSubstitutionCache&) = delete;
+
+ private:
+  friend class base::NoDestructor<FontSubstitutionCache>;
+
+  FontSubstitutionCache() {
+    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+
+    if (command_line && command_line->HasSwitch("font-substitution-map")) {
+      std::string mapping_str =
+          command_line->GetSwitchValueASCII("font-substitution-map");
+
+      // Parse mapping string: "source1:target1,source2:target2,..."
+      std::vector<std::string> mappings = base::SplitString(
+          mapping_str, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+
+      for (const auto& mapping : mappings) {
+        std::vector<std::string> parts = base::SplitString(
+            mapping, ":", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+
+        if (parts.size() == 2) {
+          // Convert to Blink String and lowercase for case-insensitive matching
+          String source = String::FromUTF8(parts[0]).LowerASCII();
+          String target = String::FromUTF8(parts[1]).LowerASCII();
+
+          substitution_map_.Set(source, target);
         }
       }
+
+      initialized_ = !substitution_map_.empty();
     }
   }
-  
-  // Not found in default 33 or CLI → block it
-  static int count = 0;
-  if (++count <= 20) {
-    // LOG(INFO) << "[FONT-WHITELIST] Blocked: " << family
-    //           << " (default 33 + CLI fonts allowed)";
-  }
-  
-  return false;
-}
+
+  bool initialized_ = false;
+  HashMap<String, String> substitution_map_;
+};
 
 }  // namespace
 
@@ -244,16 +232,27 @@ const SimpleFontData* FontCache::GetFontData(
     const FontDescription& font_description,
     const AtomicString& family,
     AlternateFontName altername_font_name) {
-  // FONT WHITELISTING: Block non-whitelisted fonts to prevent fingerprinting
-  if (!IsWhitelistedFont(family)) {
-    // Return nullptr to force fallback to generic font
-    return nullptr;
+  // FONT SUBSTITUTION: Replace specific fonts (1-9 per profile) for
+  // fingerprinting protection, but allow all other fonts to work normally.
+  // This prevents breaking website rendering while still providing protection.
+  AtomicString final_family = family;
+
+  if (FontSubstitutionCache::GetInstance().IsInitialized()) {
+    String family_str = String(family);
+    String substituted =
+        FontSubstitutionCache::GetInstance().GetSubstitutedFont(family_str);
+
+    if (substituted != family_str) {
+      // Font is being substituted - use replacement font
+      final_family = AtomicString(substituted);
+    }
+    // If no substitution found, use original font (allows normal rendering)
   }
 
   if (const FontPlatformData* platform_data = GetFontPlatformData(
           font_description,
           FontFaceCreationParams(
-              AdjustFamilyNameToAvoidUnsupportedFonts(family)),
+              AdjustFamilyNameToAvoidUnsupportedFonts(final_family)),
           altername_font_name)) {
     return FontDataFromFontPlatformData(
         platform_data, font_description.SubpixelAscentDescent());
