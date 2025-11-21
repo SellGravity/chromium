@@ -416,6 +416,9 @@ void Profile::RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
   // Font substitution mapping (per-profile persistence)
   registry->RegisterStringPref(prefs::kFontSubstitutionMapping, std::string());
 
+  // Per-profile URL blocklist (list of URLs to block per profile)
+  registry->RegisterListPref(prefs::kProfileURLBlocklist);
+
   // Instead of registering new prefs here, please create a static method and
   // invoke it from RegisterProfilePrefs() in
   // chrome/browser/prefs/browser_prefs.cc.

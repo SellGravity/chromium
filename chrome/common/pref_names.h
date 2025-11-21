@@ -4330,6 +4330,10 @@ inline constexpr char kUnicodeGlyphsNoiseSeed[] = "fingerprinting.unicode_glyphs
 inline constexpr char kFontSubstitutionMapping[] =
     "fingerprinting.font_substitution_mapping";
 
+// Per-profile URL blocklist - list of URLs/domains to block
+// When user navigates to blocked URL, they get redirected to google.com
+inline constexpr char kProfileURLBlocklist[] = "profile.url_blocklist";
+
 }  // namespace prefs
 
 #endif  // CHROME_COMMON_PREF_NAMES_H_

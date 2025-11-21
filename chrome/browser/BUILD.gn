@@ -717,6 +717,8 @@ static_library("browser") {
     "metrics/variations/chrome_variations_service_client.h",
     "metrics/variations/google_groups_manager_factory.cc",
     "metrics/variations/google_groups_manager_factory.h",
+    "navigation/profile_url_blocker_navigation_throttle.cc",
+    "navigation/profile_url_blocker_navigation_throttle.h",
     "navigation_predictor/anchor_element_preloader.cc",
     "navigation_predictor/anchor_element_preloader.h",
     "navigation_predictor/navigation_predictor.cc",
