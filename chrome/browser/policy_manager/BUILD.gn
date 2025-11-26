@@ -1,0 +1,46 @@
+# Copyright 2025 The Chromium Authors
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/config/features.gni")
+
+source_set("policy_manager") {
+  sources = [
+    "policy_ipc_client.cc",
+    "policy_ipc_client.h",
+    "policy_preference_syncer.cc",
+    "policy_preference_syncer.h",
+  ]
+
+  deps = [
+    "//base",
+    "//chrome/common",
+    "//components/prefs",
+    "//content/public/browser",
+    "//url",
+  ]
+
+  public_deps = [ "//base" ]
+
+  # Windows-specific libraries for Named Pipe
+  if (is_win) {
+    libs = [ "advapi32.lib" ]
+  }
+}
+
+source_set("unit_tests") {
+  testonly = true
+
+  sources = [
+    "policy_preference_syncer_unittest.cc",
+  ]
+
+  deps = [
+    ":policy_manager",
+    "//base",
+    "//base/test:test_support",
+    "//chrome/common",
+    "//components/prefs:test_support",
+    "//testing/gtest",
+  ]
+}

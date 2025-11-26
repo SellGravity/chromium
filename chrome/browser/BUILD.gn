@@ -1949,6 +1949,7 @@ static_library("browser") {
     "//chrome/browser/policy:path_parser",
     "//chrome/browser/policy:policy_util",
     "//chrome/browser/policy/messaging_layer/storage_selector",
+    "//chrome/browser/policy_manager",
     "//chrome/browser/prefetch",
     "//chrome/browser/prefs",
     "//chrome/browser/prefs:impl",

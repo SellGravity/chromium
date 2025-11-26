@@ -4334,6 +4334,10 @@ inline constexpr char kFontSubstitutionMapping[] =
 // When user navigates to blocked URL, they get redirected to google.com
 inline constexpr char kProfileURLBlocklist[] = "profile.url_blocklist";
 
+// Per-profile URL allowlist - list of URLs/domains to always allow
+// Whitelist takes priority over blocklist
+inline constexpr char kProfileURLAllowlist[] = "profile.url_allowlist";
+
 }  // namespace prefs
 
 #endif  // CHROME_COMMON_PREF_NAMES_H_

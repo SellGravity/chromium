@@ -5,10 +5,18 @@
 #ifndef CHROME_BROWSER_NAVIGATION_PROFILE_URL_BLOCKER_NAVIGATION_THROTTLE_H_
 #define CHROME_BROWSER_NAVIGATION_PROFILE_URL_BLOCKER_NAVIGATION_THROTTLE_H_
 
+#include <memory>
+#include <string>
+
+#include "components/url_matcher/url_matcher.h"
 #include "content/public/browser/navigation_throttle.h"
 
 class GURL;
 class PrefService;
+
+namespace policy_manager {
+class PolicyIPCClient;
+}  // namespace policy_manager
 
 namespace content {
 class NavigationHandle;
@@ -45,13 +53,31 @@ class ProfileURLBlockerNavigationThrottle
   const char* GetNameForLogging() override;
 
  private:
-  // Check if URL is in blocklist and should be blocked
+  // Check if URL is in blocklist using Chrome's URLMatcher
   bool IsURLBlocked(const GURL& url);
+
+  // Check if URL is in whitelist (whitelist takes priority)
+  bool IsURLWhitelisted(const GURL& url);
+
+  // Check URL via IPC policy server (real-time check)
+  bool IsURLBlockedViaIPC(const GURL& url);
 
   // Show notification that URL was blocked
   void ShowBlockedNotification(const GURL& blocked_url);
 
+  // Build URL matchers from preference patterns
+  void RebuildURLMatchers();
+
+  // Create URLMatcher condition set from a pattern string
+  scoped_refptr<url_matcher::URLMatcherConditionSet>
+  CreateConditionSetFromPattern(const std::string& pattern,
+                                 base::MatcherStringPattern::ID id);
+
   const raw_ptr<PrefService> prefs_;
+
+  // URLMatcher for efficient pattern matching
+  std::unique_ptr<url_matcher::URLMatcher> blocklist_matcher_;
+  std::unique_ptr<url_matcher::URLMatcher> whitelist_matcher_;
 };
 
 #endif  // CHROME_BROWSER_NAVIGATION_PROFILE_URL_BLOCKER_NAVIGATION_THROTTLE_H_

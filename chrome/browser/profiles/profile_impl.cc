@@ -73,6 +73,7 @@
 #include "chrome/browser/permissions/permission_manager_factory.h"
 #include "chrome/browser/policy/chrome_browser_policy_connector.h"
 #include "chrome/browser/policy/profile_policy_connector.h"
+#include "chrome/browser/policy_manager/policy_preference_syncer.h"
 #include "chrome/browser/policy/profile_policy_connector_builder.h"
 #include "chrome/browser/policy/schema_registry_service.h"
 #include "chrome/browser/policy/schema_registry_service_builder.h"
@@ -825,6 +826,9 @@ void ProfileImpl::DoFinalInit(CreateMode create_mode) {
   }
 
   NotifyProfileInitializationComplete();
+
+  // Initialize Policy IPC syncer for per-profile URL blocking
+  InitializePolicyIPCSyncer();
 
   RecordPrefValuesAfterProfileInitialization();
 
@@ -1683,4 +1687,24 @@ void ProfileImpl::RecordPrefValuesAfterProfileInitialization() {
   if (IsRegularProfile()) {
     payments::RecordCanMakePaymentPrefMetrics(*GetPrefs(), "Startup");
   }
+}
+
+void ProfileImpl::InitializePolicyIPCSyncer() {
+  // Check if policy pipe is configured via environment variable
+  std::unique_ptr<base::Environment> env = base::Environment::Create();
+  std::optional<std::string> pipe_name = env->GetVar("CHROMIUM_POLICY_PIPE");
+
+  if (!pipe_name.has_value() || pipe_name->empty()) {
+    // No IPC policy server configured, skip initialization
+    return;
+  }
+
+  // Create and initialize policy syncer with profile name
+  std::string profile_display_name = GetPath().BaseName().AsUTF8Unsafe();
+  policy_syncer_ =
+      std::make_unique<policy_manager::PolicyPreferenceSyncer>(GetPrefs());
+  policy_syncer_->Initialize(*pipe_name, profile_display_name);
+
+  LOG(INFO) << "[ProfileImpl] Policy IPC syncer initialized for profile: "
+            << GetPath().BaseName().AsUTF8Unsafe();
 }

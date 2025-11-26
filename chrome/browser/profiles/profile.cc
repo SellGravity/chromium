@@ -419,6 +419,9 @@ void Profile::RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
   // Per-profile URL blocklist (list of URLs to block per profile)
   registry->RegisterListPref(prefs::kProfileURLBlocklist);
 
+  // Per-profile URL allowlist (whitelist has priority over blacklist)
+  registry->RegisterListPref(prefs::kProfileURLAllowlist);
+
   // Instead of registering new prefs here, please create a static method and
   // invoke it from RegisterProfilePrefs() in
   // chrome/browser/prefs/browser_prefs.cc.
