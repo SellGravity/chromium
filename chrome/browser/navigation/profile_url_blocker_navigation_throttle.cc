@@ -70,9 +70,11 @@ ProfileURLBlockerNavigationThrottle::WillStartRequest() {
 
   // PRIORITY 1: Check IPC server first (real-time, highest priority)
   // IPC can whitelist URLs that override local blocklist
+  // IMPORTANT: Always check IPC even when disconnected for fail-closed security
   auto* ipc_client = policy_manager::PolicyIPCClient::GetInstance();
-  if (ipc_client && ipc_client->IsConnected()) {
+  if (ipc_client) {
     // Pass profile name explicitly for per-profile policy
+    // CheckURLSync handles fail-closed logic internally (blocks when server offline)
     policy_manager::PolicyDecision decision =
         ipc_client->CheckURLSync(url.spec(), profile_name);
 
@@ -83,7 +85,7 @@ ProfileURLBlockerNavigationThrottle::WillStartRequest() {
                 << " (reason: " << decision.reason << ")";
       return PROCEED;
     } else {
-      // Server explicitly blocks this URL
+      // Server explicitly blocks this URL (or LOCKDOWN mode active)
       LOG(INFO) << "[Profile URL Blocker] URL blocked by IPC: " << url.spec()
                 << " | Profile: " << profile_name
                 << " (reason: " << decision.reason << ")";

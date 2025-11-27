@@ -13,6 +13,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/threading/thread.h"
+#include "base/time/time.h"
 #include "base/values.h"
 
 namespace policy_manager {
@@ -72,6 +73,27 @@ class PolicyIPCClient {
   // Set profile name for tracking (displayed in server logs)
   void SetProfileName(const std::string& profile_name);
 
+  // ========== ANTI-BYPASS / FAIL-CLOSED SECURITY ==========
+
+  // Enable fail-closed mode (block all when server unavailable)
+  // This prevents bypass by killing the server
+  void SetFailClosedMode(bool enabled);
+
+  // Check if fail-closed mode is enabled
+  bool IsFailClosedMode() const;
+
+  // Get time since last successful server contact
+  base::TimeDelta GetTimeSinceLastContact() const;
+
+  // Check if server is responsive (heartbeat)
+  bool IsServerAlive();
+
+  // Set grace period before enforcing fail-closed (default: 30s)
+  void SetGracePeriod(base::TimeDelta grace_period);
+
+  // Check if we're in lockdown mode (server offline + grace period expired)
+  bool IsInLockdownMode() const;
+
   // Get singleton instance
   static PolicyIPCClient* GetInstance();
 
@@ -97,6 +119,21 @@ class PolicyIPCClient {
 
   // Track policy version to detect changes
   int last_policy_version_ = 0;
+
+  // ========== FAIL-CLOSED SECURITY STATE ==========
+
+  // Enable fail-closed mode (block all when server offline)
+  bool fail_closed_mode_ = true;  // DEFAULT: ENABLED for security
+
+  // Time of last successful server contact
+  base::TimeTicks last_successful_contact_;
+
+  // Grace period before enforcing strict lockdown (default: 30 seconds)
+  base::TimeDelta grace_period_ = base::Seconds(30);
+
+  // Track connection failures
+  int consecutive_failures_ = 0;
+  static constexpr int kMaxFailuresBeforeLockdown = 3;
 
   SEQUENCE_CHECKER(sequence_checker_);
   base::WeakPtrFactory<PolicyIPCClient> weak_factory_{this};

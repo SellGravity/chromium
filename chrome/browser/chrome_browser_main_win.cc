@@ -24,6 +24,7 @@
 #include "base/command_line.h"
 #include "base/dcheck_is_on.h"
 #include "base/enterprise_util.h"
+#include "base/environment.h"
 #include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -62,6 +63,7 @@
 #include "chrome/browser/performance_manager/public/dll_pre_read_policy_win.h"
 #include "chrome/browser/platform_experience/features.h"
 #include "chrome/browser/platform_experience/prefs.h"
+#include "chrome/browser/policy_manager/policy_ipc_client.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/profiles/profile_shortcut_manager.h"
 #include "chrome/browser/shell_integration_win.h"
@@ -608,6 +610,40 @@ int ChromeBrowserMainPartsWin::PreCreateThreads() {
 
 void ChromeBrowserMainPartsWin::PostCreateThreads() {
   performance_manager::InitializeDllPrereadPolicy();
+
+  // ========== POLICY IPC CLIENT (FAIL-CLOSED SECURITY) ==========
+  // ALWAYS create singleton - fail-closed mode blocks ALL URLs when server offline
+  policy_manager::PolicyIPCClient* ipc_client =
+      new policy_manager::PolicyIPCClient();
+
+  // Check if policy pipe is configured via environment variable
+  std::unique_ptr<base::Environment> env = base::Environment::Create();
+  std::optional<std::string> pipe_name = env->GetVar("CHROMIUM_POLICY_PIPE");
+
+  if (pipe_name.has_value() && !pipe_name->empty()) {
+    // Try to connect to policy server
+    bool connected = ipc_client->Initialize(*pipe_name);
+
+    if (connected) {
+      LOG(INFO) << "[ChromeBrowserMain] ✓ Policy IPC connected: " << *pipe_name;
+      LOG(INFO) << "[ChromeBrowserMain] ✓ Fail-closed security: ENABLED";
+      LOG(INFO) << "[ChromeBrowserMain] → URLs will be BLOCKED if server goes offline";
+    } else {
+      LOG(ERROR) << "[ChromeBrowserMain] ✗ Failed to connect to policy server: "
+                 << *pipe_name;
+      LOG(ERROR) << "[ChromeBrowserMain] ✗ LOCKDOWN MODE: All URLs will be BLOCKED "
+                 << "(server offline + fail-closed enabled)";
+      LOG(ERROR) << "[ChromeBrowserMain] → Start server to allow navigation";
+    }
+  } else {
+    // No policy server configured - LOCKDOWN by default (fail-closed)
+    LOG(WARNING) << "[ChromeBrowserMain] ⚠ No policy server configured "
+                 << "(CHROMIUM_POLICY_PIPE not set)";
+    LOG(WARNING) << "[ChromeBrowserMain] ⚠ LOCKDOWN MODE: All URLs BLOCKED "
+                 << "(fail-closed security active)";
+    LOG(WARNING) << "[ChromeBrowserMain] → Set CHROMIUM_POLICY_PIPE and start "
+                 << "server to allow navigation";
+  }
 
   ChromeBrowserMainParts::PostCreateThreads();
 }

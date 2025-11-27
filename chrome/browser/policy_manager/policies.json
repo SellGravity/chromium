@@ -49,5 +49,12 @@
     "next_blocklist_id": 2,
     "next_whitelist_id": 1,
     "version": 1
+  },
+  "Unknown": {
+    "blocklist": {},
+    "whitelist": {},
+    "next_blocklist_id": 1,
+    "next_whitelist_id": 1,
+    "version": 1
   }
 }

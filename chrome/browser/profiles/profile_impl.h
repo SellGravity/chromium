@@ -47,10 +47,6 @@ class ProfilePolicyConnector;
 class ProfileCloudPolicyManager;
 }  // namespace policy
 
-namespace policy_manager {
-class PolicyPreferenceSyncer;
-}  // namespace policy_manager
-
 namespace sync_preferences {
 class PrefServiceSyncable;
 }
@@ -213,9 +209,6 @@ class ProfileImpl : public Profile {
   // metrics relating to user prefs.
   void RecordPrefValuesAfterProfileInitialization();
 
-  // Initialize Policy IPC syncer for external policy management
-  void InitializePolicyIPCSyncer();
-
   policy::ConfigurationPolicyProvider* configuration_policy_provider();
 
   base::FilePath path_;
@@ -303,9 +296,6 @@ class ProfileImpl : public Profile {
   // components/keyed_service/content/browser_context_keyed_service_factory.*
 
   raw_ptr<Profile::Delegate> delegate_;
-
-  // Policy IPC syncer for external policy management
-  std::unique_ptr<policy_manager::PolicyPreferenceSyncer> policy_syncer_;
 };
 
 #endif  // CHROME_BROWSER_PROFILES_PROFILE_IMPL_H_
