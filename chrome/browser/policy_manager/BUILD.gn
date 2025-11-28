@@ -22,9 +22,12 @@ source_set("policy_manager") {
 
   public_deps = [ "//base" ]
 
-  # Windows-specific libraries for Named Pipe
+  # Windows-specific libraries for HTTP client (WinHTTP)
   if (is_win) {
-    libs = [ "advapi32.lib" ]
+    libs = [
+      "advapi32.lib",
+      "winhttp.lib",
+    ]
   }
 }
 

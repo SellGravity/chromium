@@ -65,6 +65,18 @@ ProfileURLBlockerNavigationThrottle::WillStartRequest() {
       Profile::FromBrowserContext(web_contents->GetBrowserContext());
   std::string profile_name = profile->GetBaseName().AsUTF8Unsafe();
 
+  // ========== BYPASS OTR PROFILES (DevTools, Incognito) ==========
+  // OTR profiles are temporary profiles used for:
+  // - Lighthouse/DevTools audits (created by Target.createBrowserContext)
+  // - Incognito mode
+  // - Guest mode
+  // These should bypass policy checks to avoid conflicts
+  if (profile->IsOffTheRecord()) {
+    LOG(INFO) << "[Profile URL Blocker] BYPASS: OTR profile detected: "
+              << profile_name << " (Lighthouse/Incognito/Guest mode)";
+    return PROCEED;
+  }
+
   LOG(INFO) << "[Profile URL Blocker] Checking URL for profile: "
             << profile_name;
 

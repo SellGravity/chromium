@@ -32,8 +32,15 @@ using PolicyCheckCallback =
 using PolicyUpdateCallback =
     base::RepeatingCallback<void(const base::Value::Dict&)>;
 
-// Client for communicating with external policy manager via Named Pipe (IPC).
+// Client for communicating with external policy manager via HTTP REST API.
 // This allows real-time policy updates from an external management server.
+//
+// HTTP is more stable and reliable than Named Pipes:
+// - Connection pooling and keep-alive
+// - Built-in timeout and retry handling
+// - No pipe busy/timeout issues
+// - Works across all platforms
+// - Easy to debug with standard HTTP tools
 class PolicyIPCClient {
  public:
   PolicyIPCClient();
@@ -42,8 +49,9 @@ class PolicyIPCClient {
   PolicyIPCClient(const PolicyIPCClient&) = delete;
   PolicyIPCClient& operator=(const PolicyIPCClient&) = delete;
 
-  // Initialize connection to named pipe
-  bool Initialize(const std::string& pipe_name);
+  // Initialize connection to HTTP policy server
+  // server_url: Base URL (e.g., "http://localhost:8765")
+  bool Initialize(const std::string& server_url);
 
   // Synchronous URL check - blocks until response
   PolicyDecision CheckURLSync(const std::string& url);
@@ -94,13 +102,23 @@ class PolicyIPCClient {
   // Check if we're in lockdown mode (server offline + grace period expired)
   bool IsInLockdownMode() const;
 
+  // ========== AUTO-RECONNECT ==========
+
+  // Try to reconnect to server (called automatically on connection failure)
+  bool TryReconnect();
+
+  // Enable/disable auto-reconnect (default: enabled)
+  void SetAutoReconnect(bool enabled);
+
   // Get singleton instance
   static PolicyIPCClient* GetInstance();
 
  private:
-  // Send message to pipe and receive response
-  bool SendMessage(const std::string& request_json,
-                   std::string* response_json);
+  // Send HTTP POST request and receive JSON response
+  // Returns true if request succeeded, false otherwise
+  bool SendHttpPost(const std::string& endpoint,
+                    const std::string& request_json,
+                    std::string* response_json);
 
   // Worker to poll policy changes
   void WatchPolicyChanges();
@@ -108,8 +126,8 @@ class PolicyIPCClient {
   // Schedule next policy check
   void ScheduleNextPolicyCheck(int delay_ms);
 
-  std::string pipe_name_;
-  std::string profile_name_;  // For tracking which profile is making requests
+  std::string server_url_;     // HTTP server base URL (e.g., "http://localhost:8765")
+  std::string profile_name_;   // For tracking which profile is making requests
   bool connected_ = false;
   bool watching_ = false;
   int poll_interval_ms_ = 5000;
@@ -134,6 +152,17 @@ class PolicyIPCClient {
   // Track connection failures
   int consecutive_failures_ = 0;
   static constexpr int kMaxFailuresBeforeLockdown = 3;
+
+  // ========== AUTO-RECONNECT STATE ==========
+
+  // Enable auto-reconnect on connection failure
+  bool auto_reconnect_enabled_ = true;  // DEFAULT: ENABLED
+
+  // Time of last reconnect attempt (to prevent spam)
+  base::TimeTicks last_reconnect_attempt_;
+
+  // Minimum delay between reconnect attempts (default: 5 seconds)
+  base::TimeDelta reconnect_delay_ = base::Seconds(5);
 
   SEQUENCE_CHECKER(sequence_checker_);
   base::WeakPtrFactory<PolicyIPCClient> weak_factory_{this};

@@ -611,38 +611,43 @@ int ChromeBrowserMainPartsWin::PreCreateThreads() {
 void ChromeBrowserMainPartsWin::PostCreateThreads() {
   performance_manager::InitializeDllPrereadPolicy();
 
-  // ========== POLICY IPC CLIENT (FAIL-CLOSED SECURITY) ==========
+  // ========== POLICY HTTP CLIENT (FAIL-CLOSED SECURITY) ==========
   // ALWAYS create singleton - fail-closed mode blocks ALL URLs when server offline
   policy_manager::PolicyIPCClient* ipc_client =
       new policy_manager::PolicyIPCClient();
 
-  // Check if policy pipe is configured via environment variable
+  // Check if policy server URL is configured via environment variable
+  // If not set, use default HTTP URL for commercial release
   std::unique_ptr<base::Environment> env = base::Environment::Create();
-  std::optional<std::string> pipe_name = env->GetVar("CHROMIUM_POLICY_PIPE");
+  std::optional<std::string> server_url = env->GetVar("CHROMIUM_POLICY_URL");
 
-  if (pipe_name.has_value() && !pipe_name->empty()) {
-    // Try to connect to policy server
-    bool connected = ipc_client->Initialize(*pipe_name);
+  // DEFAULT: Use localhost HTTP server for policy (more stable than Named Pipes)
+  std::string default_server_url = "http://localhost:8765";
 
-    if (connected) {
-      LOG(INFO) << "[ChromeBrowserMain] ✓ Policy IPC connected: " << *pipe_name;
-      LOG(INFO) << "[ChromeBrowserMain] ✓ Fail-closed security: ENABLED";
-      LOG(INFO) << "[ChromeBrowserMain] → URLs will be BLOCKED if server goes offline";
-    } else {
-      LOG(ERROR) << "[ChromeBrowserMain] ✗ Failed to connect to policy server: "
-                 << *pipe_name;
-      LOG(ERROR) << "[ChromeBrowserMain] ✗ LOCKDOWN MODE: All URLs will be BLOCKED "
-                 << "(server offline + fail-closed enabled)";
-      LOG(ERROR) << "[ChromeBrowserMain] → Start server to allow navigation";
-    }
+  if (!server_url.has_value() || server_url->empty()) {
+    // Use default HTTP server URL
+    server_url = default_server_url;
+    LOG(INFO) << "[ChromeBrowserMain] Using default policy server: " << *server_url;
   } else {
-    // No policy server configured - LOCKDOWN by default (fail-closed)
-    LOG(WARNING) << "[ChromeBrowserMain] ⚠ No policy server configured "
-                 << "(CHROMIUM_POLICY_PIPE not set)";
-    LOG(WARNING) << "[ChromeBrowserMain] ⚠ LOCKDOWN MODE: All URLs BLOCKED "
-                 << "(fail-closed security active)";
-    LOG(WARNING) << "[ChromeBrowserMain] → Set CHROMIUM_POLICY_PIPE and start "
-                 << "server to allow navigation";
+    LOG(INFO) << "[ChromeBrowserMain] Using custom policy server: " << *server_url;
+  }
+
+  // ALWAYS try to connect to HTTP policy server
+  bool connected = ipc_client->Initialize(*server_url);
+
+  if (connected) {
+    LOG(INFO) << "[ChromeBrowserMain] ✓ Policy HTTP API connected: " << *server_url;
+    LOG(INFO) << "[ChromeBrowserMain] ✓ Fail-closed security: ENABLED";
+    LOG(INFO) << "[ChromeBrowserMain] ✓ Connection: Stable HTTP (not Named Pipes)";
+    LOG(INFO) << "[ChromeBrowserMain] → URLs will be BLOCKED if server goes offline";
+  } else {
+    LOG(ERROR) << "[ChromeBrowserMain] ✗ Failed to connect to policy server: "
+               << *server_url;
+    LOG(ERROR) << "[ChromeBrowserMain] ✗ LOCKDOWN MODE: All URLs will be BLOCKED "
+               << "(server offline + fail-closed enabled)";
+    LOG(ERROR) << "[ChromeBrowserMain] → Start HTTP policy server to allow navigation:";
+    LOG(ERROR) << "[ChromeBrowserMain]   cd C:\\MyBrowser\\policy_manager";
+    LOG(ERROR) << "[ChromeBrowserMain]   python test_policy_server_http.py";
   }
 
   ChromeBrowserMainParts::PostCreateThreads();
