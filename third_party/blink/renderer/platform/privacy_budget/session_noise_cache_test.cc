@@ -111,6 +111,9 @@ TEST_F(SessionNoiseCacheTest, WithProfileSeed) {
   // Noise should still be generated
   EXPECT_GE(noise, -0.5);
   EXPECT_LE(noise, 0.5);
+
+  // Clean up command line switch for subsequent tests
+  base::CommandLine::ForCurrentProcess()->RemoveSwitch("canvas-seed");
 }
 
 TEST_F(SessionNoiseCacheTest, SingletonBehavior) {

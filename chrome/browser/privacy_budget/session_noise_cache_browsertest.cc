@@ -105,9 +105,14 @@ IN_PROC_BROWSER_TEST_F(SessionNoiseCacheBrowserTest, RectMeasurementsWork) {
   EXPECT_TRUE(result.error.empty());
 
   // Verify we got reasonable rect values
-  double x = result.ExtractDouble().value_or(-1.0);
-  EXPECT_GT(x, 0.0);
-  EXPECT_LT(x, 1000.0);
+  // The result is a JavaScript object, so we need to access its properties
+  const base::Value& dict = result.value;
+  ASSERT_TRUE(dict.is_dict());
+  
+  std::optional<double> x = dict.GetDict().FindDouble("x");
+  ASSERT_TRUE(x.has_value());
+  EXPECT_GT(x.value(), 0.0);
+  EXPECT_LT(x.value(), 1000.0);
 }
 
 }  // namespace

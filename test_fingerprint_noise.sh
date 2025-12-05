@@ -5,7 +5,9 @@
 
 # Script to build and test the fingerprint noise implementation
 
-set -e
+set -e          # Exit on error
+set -u          # Exit on undefined variable
+set -o pipefail # Exit on pipe failure
 
 echo "========================================"
 echo "Fingerprint Noise Testing Script"
