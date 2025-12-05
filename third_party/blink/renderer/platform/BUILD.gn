@@ -2365,6 +2365,7 @@ source_set("blink_platform_unittests_sources") {
     "peerconnection/webrtc_decoding_info_handler_test.cc",
     "peerconnection/webrtc_encoding_info_handler_test.cc",
     "peerconnection/webrtc_video_track_source_test.cc",
+    "privacy_budget/session_noise_cache_test.cc",
     "region_capture_crop_id_test.cc",
     "runtime_enabled_features_test.cc",
     "sparse_vector_test.cc",
