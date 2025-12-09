@@ -10,10 +10,15 @@
 #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 
 namespace blink {
 
 float NavigatorDeviceMemory::deviceMemory() const {
+  int override_memory = SessionNoiseCache::GetInstance().GetDeviceMemory();
+  if (override_memory > 0) {
+    return static_cast<float>(override_memory);
+  }
   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
 }
 

@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "base/functional/callback.h"
@@ -163,6 +164,22 @@ class PolicyIPCClient {
 
   // Minimum delay between reconnect attempts (default: 5 seconds)
   base::TimeDelta reconnect_delay_ = base::Seconds(5);
+
+  // ========== URL CACHE (to prevent repeated server calls) ==========
+  struct CachedDecision {
+    PolicyDecision decision;
+    base::TimeTicks timestamp;
+  };
+  
+  // Cache URL decisions for 30 seconds to reduce server load
+  std::unordered_map<std::string, CachedDecision> url_cache_;
+  base::TimeDelta cache_ttl_ = base::Seconds(30);
+  
+  // Get cached decision if still valid
+  bool GetCachedDecision(const std::string& cache_key, PolicyDecision* decision);
+  
+  // Store decision in cache
+  void CacheDecision(const std::string& cache_key, const PolicyDecision& decision);
 
   SEQUENCE_CHECKER(sequence_checker_);
   base::WeakPtrFactory<PolicyIPCClient> weak_factory_{this};

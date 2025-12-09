@@ -29,26 +29,52 @@ constexpr unsigned kDefaultNumberOfOutputChannels = 2;
 constexpr double kStandardFingerprintId = 124.04347527516074;
 constexpr const char* kFullBufferFingerprintId = "a5b57a7aadf52796121947e53afb099d0ed347f8ac05e73b30925f91447ec5f7";
 
-// Helper function to generate deterministic noise from fingerprint ID
-float GenerateNoiseFromFingerprint(double fingerprint_id, float min_val, float max_val) {
-  // Convert fingerprint to seed for deterministic noise generation
-  std::hash<double> hasher;
-  auto seed = static_cast<unsigned>(hasher(fingerprint_id));
-  std::mt19937 gen(seed);
-  std::uniform_real_distribution<float> dis(min_val, max_val);
-  return dis(gen);
-}
+// ========== CACHED NOISE VALUES (computed once at startup) ==========
+// These are deterministic based on fingerprint IDs, so we compute once and cache
+struct CachedNoiseValues {
+  float standard_threshold = 0.0f;
+  float standard_knee = 0.0f;
+  float standard_ratio = 0.0f;
+  float full_buffer_threshold = 0.0f;
+  float full_buffer_knee = 0.0f;
+  float full_buffer_ratio = 0.0f;
+  bool initialized = false;
+  
+  void Initialize() {
+    if (initialized) return;
+    
+    // Standard fingerprint noise (computed once)
+    {
+      std::hash<double> hasher;
+      auto seed = static_cast<unsigned>(hasher(kStandardFingerprintId));
+      std::mt19937 gen(seed);
+      std::uniform_real_distribution<float> dis_threshold(-0.0001f, 0.0001f);
+      std::uniform_real_distribution<float> dis_knee(-0.001f, 0.001f);
+      std::uniform_real_distribution<float> dis_ratio(-0.0001f, 0.0001f);
+      standard_threshold = dis_threshold(gen);
+      standard_knee = dis_knee(gen);
+      standard_ratio = dis_ratio(gen);
+    }
+    
+    // Full buffer fingerprint noise (computed once)
+    {
+      std::hash<std::string> hasher;
+      auto seed = static_cast<unsigned>(hasher(kFullBufferFingerprintId));
+      std::mt19937 gen(seed);
+      std::uniform_real_distribution<float> dis_threshold(-0.0001f, 0.0001f);
+      std::uniform_real_distribution<float> dis_knee(-0.001f, 0.001f);
+      std::uniform_real_distribution<float> dis_ratio(-0.0001f, 0.0001f);
+      full_buffer_threshold = dis_threshold(gen);
+      full_buffer_knee = dis_knee(gen);
+      full_buffer_ratio = dis_ratio(gen);
+    }
+    
+    initialized = true;
+  }
+};
 
-// Helper function to generate deterministic noise from string fingerprint
-float GenerateNoiseFromFingerprint(const std::string& fingerprint_id, float min_val, float max_val) {
-  // Convert string fingerprint to seed for deterministic noise generation
-  std::hash<std::string> hasher;
-  auto seed = static_cast<unsigned>(hasher(fingerprint_id));
-  std::mt19937 gen(seed);
-  std::uniform_real_distribution<float> dis(min_val, max_val);
-  return dis(gen);
-}
-
+// Global cached noise values - initialized once, used many times
+static CachedNoiseValues g_cached_noise;
 
 }  // namespace
 
@@ -101,27 +127,22 @@ void DynamicsCompressorHandler::Process(uint32_t frames_to_process) {
   // Apply fingerprint-based noise only if audio-noise flag is enabled
   auto* cmd = base::CommandLine::ForCurrentProcess();
   if (cmd && cmd->HasSwitch("audio-noise")) {
-    // Detect operation type and apply corresponding fingerprint-based noise
+    // Initialize cached noise values once (thread-safe via flag check)
+    g_cached_noise.Initialize();
+    
+    // Detect operation type and apply corresponding cached noise
     bool is_full_buffer_operation = (frames_to_process == GetDeferredTaskHandler().RenderQuantumFrames());
 
     if (is_full_buffer_operation) {
-      // Full buffer dynamics compressor - use string fingerprint ID
-      float noise_threshold = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
-      float noise_knee = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.001f, 0.001f);
-      float noise_ratio = GenerateNoiseFromFingerprint(kFullBufferFingerprintId, -0.0001f, 0.0001f);
-
-      threshold += noise_threshold;
-      knee += noise_knee;
-      ratio += noise_ratio;
+      // Full buffer dynamics compressor - use cached full buffer noise
+      threshold += g_cached_noise.full_buffer_threshold;
+      knee += g_cached_noise.full_buffer_knee;
+      ratio += g_cached_noise.full_buffer_ratio;
     } else {
-      // Standard dynamics compressor - use numeric fingerprint ID
-      float noise_threshold = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
-      float noise_knee = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.001f, 0.001f);
-      float noise_ratio = GenerateNoiseFromFingerprint(kStandardFingerprintId, -0.0001f, 0.0001f);
-
-      threshold += noise_threshold;
-      knee += noise_knee;
-      ratio += noise_ratio;
+      // Standard dynamics compressor - use cached standard noise
+      threshold += g_cached_noise.standard_threshold;
+      knee += g_cached_noise.standard_knee;
+      ratio += g_cached_noise.standard_ratio;
     }
   }
 

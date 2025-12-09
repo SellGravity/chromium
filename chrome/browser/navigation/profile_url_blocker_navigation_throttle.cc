@@ -59,6 +59,13 @@ ProfileURLBlockerNavigationThrottle::WillStartRequest() {
     return PROCEED;
   }
 
+  // ========== SKIP SUB-FRAME & RESOURCE REQUESTS FOR PERFORMANCE ==========
+  // Only check main frame navigations to reduce latency
+  // Sub-resources (images, scripts, etc.) inherit the main frame's policy
+  if (!navigation_handle()->IsInMainFrame()) {
+    return PROCEED;
+  }
+
   // Get profile name from navigation context
   content::WebContents* web_contents = navigation_handle()->GetWebContents();
   Profile* profile =
@@ -72,12 +79,12 @@ ProfileURLBlockerNavigationThrottle::WillStartRequest() {
   // - Guest mode
   // These should bypass policy checks to avoid conflicts
   if (profile->IsOffTheRecord()) {
-    LOG(INFO) << "[Profile URL Blocker] BYPASS: OTR profile detected: "
+    DVLOG(1) << "[Profile URL Blocker] BYPASS: OTR profile detected: "
               << profile_name << " (Lighthouse/Incognito/Guest mode)";
     return PROCEED;
   }
 
-  LOG(INFO) << "[Profile URL Blocker] Checking URL for profile: "
+  DVLOG(2) << "[Profile URL Blocker] Checking URL for profile: "
             << profile_name;
 
   // PRIORITY 1: Check IPC server first (real-time, highest priority)
@@ -92,7 +99,7 @@ ProfileURLBlockerNavigationThrottle::WillStartRequest() {
 
     if (decision.allow) {
       // Server explicitly allows this URL (either whitelisted or not in any list)
-      LOG(INFO) << "[Profile URL Blocker] URL allowed by IPC: " << url.spec()
+      DVLOG(1) << "[Profile URL Blocker] URL allowed by IPC: " << url.spec()
                 << " | Profile: " << profile_name
                 << " (reason: " << decision.reason << ")";
       return PROCEED;
@@ -150,7 +157,7 @@ ProfileURLBlockerNavigationThrottle::WillStartRequest() {
   // PRIORITY 2: Fallback to local prefs if IPC not available
   // Check local whitelist first (whitelist overrides everything)
   if (IsURLWhitelisted(url)) {
-    LOG(INFO) << "[Profile URL Blocker] URL whitelisted (local prefs): " << url.spec();
+    DVLOG(1) << "[Profile URL Blocker] URL whitelisted (local prefs): " << url.spec();
     return PROCEED;
   }
 
@@ -270,7 +277,7 @@ void ProfileURLBlockerNavigationThrottle::RebuildURLMatchers() {
     whitelist_matcher_->AddConditionSets(condition_sets);
   }
 
-  LOG(INFO) << "[Profile URL Blocker] Rebuilt URL matchers";
+  DVLOG(1) << "[Profile URL Blocker] Rebuilt URL matchers";
 }
 
 scoped_refptr<url_matcher::URLMatcherConditionSet>
@@ -378,7 +385,7 @@ bool ProfileURLBlockerNavigationThrottle::IsURLBlocked(const GURL& url) {
       blocklist_matcher_->MatchURL(url);
 
   if (!matches.empty()) {
-    LOG(INFO) << "[Profile URL Blocker] URL matched blocklist: " << url.spec()
+    DVLOG(1) << "[Profile URL Blocker] URL matched blocklist: " << url.spec()
               << " (matched " << matches.size() << " patterns)";
     return true;
   }
@@ -396,7 +403,7 @@ bool ProfileURLBlockerNavigationThrottle::IsURLWhitelisted(const GURL& url) {
       whitelist_matcher_->MatchURL(url);
 
   if (!matches.empty()) {
-    LOG(INFO) << "[Profile URL Blocker] URL matched whitelist: " << url.spec()
+    DVLOG(1) << "[Profile URL Blocker] URL matched whitelist: " << url.spec()
               << " (matched " << matches.size() << " patterns)";
     return true;
   }
@@ -406,7 +413,7 @@ bool ProfileURLBlockerNavigationThrottle::IsURLWhitelisted(const GURL& url) {
 
 void ProfileURLBlockerNavigationThrottle::ShowBlockedNotification(
     const GURL& blocked_url) {
-  LOG(INFO) << "[Profile URL Blocker] Blocked access to: " << blocked_url.spec();
+  DVLOG(1) << "[Profile URL Blocker] Blocked access to: " << blocked_url.spec();
 }
 
 bool ProfileURLBlockerNavigationThrottle::IsURLBlockedViaIPC(const GURL& url) {
@@ -423,7 +430,7 @@ bool ProfileURLBlockerNavigationThrottle::IsURLBlockedViaIPC(const GURL& url) {
       ipc_client->CheckURLSync(url.spec());
 
   if (!decision.allow) {
-    LOG(INFO) << "[Profile URL Blocker] Blocked via IPC: " << url.spec()
+    DVLOG(1) << "[Profile URL Blocker] Blocked via IPC: " << url.spec()
               << " (reason: " << decision.reason << ")";
     return true;
   }

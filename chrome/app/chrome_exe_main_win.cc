@@ -9,6 +9,10 @@
 
 #include <malloc.h>
 #include <stddef.h>
+#include <shlobj.h>
+#include <shellapi.h>
+#include <aclapi.h>
+#include <sddl.h>
 
 #include <algorithm>
 #include <array>
@@ -60,6 +64,236 @@ int main();
 #endif
 
 namespace {
+
+// =============================================================================
+// PORTABLE SANDBOX PERMISSION FIX
+// =============================================================================
+// When Gra Browser is extracted to a new folder (USB, different drive, etc.),
+// AppContainer sandbox fails because the folder lacks permissions for
+// "ALL APPLICATION PACKAGES" (SID: S-1-15-2-1).
+//
+// This function automatically grants Read/Execute permissions to the browser
+// directory, running only ONCE per new location (uses a marker file).
+// =============================================================================
+
+// Marker file to track if permissions have been granted for this location
+constexpr wchar_t kPermissionMarkerFile[] = L".sandbox_permissions_granted";
+
+// Get the directory containing the current executable
+std::wstring GetExeDirectory() {
+  wchar_t buffer[MAX_PATH + 1] = {0};
+  DWORD length = ::GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+  if (length == 0 || length >= MAX_PATH) {
+    return L"";
+  }
+  
+  std::wstring path(buffer);
+  size_t last_slash = path.find_last_of(L"\\/");
+  if (last_slash != std::wstring::npos) {
+    return path.substr(0, last_slash);
+  }
+  return L"";
+}
+
+// Check if we've already granted permissions for THIS SPECIFIC directory.
+// The marker file stores the path where permissions were granted.
+// If the browser folder was moved/copied, the stored path won't match
+// the current path, so we'll re-grant permissions.
+bool HasPermissionMarker(const std::wstring& dir) {
+  std::wstring marker_path = dir + L"\\" + kPermissionMarkerFile;
+  
+  // Step 1: Check if marker file exists
+  HANDLE hFile = ::CreateFileW(
+      marker_path.c_str(),
+      GENERIC_READ,
+      FILE_SHARE_READ,
+      nullptr,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      nullptr);
+  
+  if (hFile == INVALID_HANDLE_VALUE) {
+    return false;  // File doesn't exist -> need to grant permissions
+  }
+  
+  // Step 2: Read the stored path from marker file
+  wchar_t stored_path[MAX_PATH + 1] = {0};
+  DWORD bytes_read = 0;
+  BOOL read_success = ::ReadFile(
+      hFile,
+      stored_path,
+      MAX_PATH * sizeof(wchar_t),
+      &bytes_read,
+      nullptr);
+  ::CloseHandle(hFile);
+  
+  if (!read_success || bytes_read == 0) {
+    return false;  // Can't read file -> re-grant permissions
+  }
+  
+  // Ensure null-termination
+  stored_path[bytes_read / sizeof(wchar_t)] = L'\0';
+  
+  // Step 3 & 4: Compare stored path with current directory
+  // Case-insensitive comparison for Windows paths
+  if (_wcsicmp(stored_path, dir.c_str()) == 0) {
+    return true;   // Paths match -> permissions already granted for this location
+  }
+  
+  // Paths don't match -> browser was moved/copied, need to re-grant permissions
+  return false;
+}
+
+// Create the permission marker file with the current directory path.
+// This allows us to detect if the browser folder is moved/copied later.
+void CreatePermissionMarker(const std::wstring& dir) {
+  std::wstring marker_path = dir + L"\\" + kPermissionMarkerFile;
+  HANDLE hFile = ::CreateFileW(
+      marker_path.c_str(),
+      GENERIC_WRITE,
+      0,
+      nullptr,
+      CREATE_ALWAYS,
+      FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+      nullptr);
+  if (hFile != INVALID_HANDLE_VALUE) {
+    // Write the current directory path (as wide string)
+    // This will be compared on next startup to detect folder moves
+    DWORD written;
+    ::WriteFile(hFile, dir.c_str(), 
+                static_cast<DWORD>(dir.length() * sizeof(wchar_t)), 
+                &written, nullptr);
+    ::CloseHandle(hFile);
+  }
+}
+
+// Grant Read/Execute permissions to ALL APPLICATION PACKAGES using Windows API
+// This is more reliable than calling icacls.exe
+bool GrantAppContainerPermissions(const std::wstring& dir) {
+  // ALL APPLICATION PACKAGES SID: S-1-15-2-1
+  PSID pSid = nullptr;
+  if (!::ConvertStringSidToSidW(L"S-1-15-2-1", &pSid)) {
+    return false;
+  }
+
+  // Get current DACL
+  PACL pOldDacl = nullptr;
+  PSECURITY_DESCRIPTOR pSD = nullptr;
+  DWORD result = ::GetNamedSecurityInfoW(
+      dir.c_str(),
+      SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION,
+      nullptr, nullptr,
+      &pOldDacl,
+      nullptr,
+      &pSD);
+  
+  if (result != ERROR_SUCCESS) {
+    ::LocalFree(pSid);
+    return false;
+  }
+
+  // Create new ACE for ALL APPLICATION PACKAGES
+  // Grant: Read, Execute, List folder contents (for directories)
+  EXPLICIT_ACCESSW ea = {0};
+  ea.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
+  ea.grfAccessMode = GRANT_ACCESS;
+  ea.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+  ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+  ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(pSid);
+
+  // Merge with existing DACL
+  PACL pNewDacl = nullptr;
+  result = ::SetEntriesInAclW(1, &ea, pOldDacl, &pNewDacl);
+  
+  if (result != ERROR_SUCCESS) {
+    ::LocalFree(pSid);
+    ::LocalFree(pSD);
+    return false;
+  }
+
+  // Apply new DACL to directory (with inheritance to children)
+  result = ::SetNamedSecurityInfoW(
+      const_cast<LPWSTR>(dir.c_str()),
+      SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION,
+      nullptr, nullptr,
+      pNewDacl,
+      nullptr);
+
+  // If direct API fails, fallback to icacls (handles inheritance better)
+  if (result != ERROR_SUCCESS) {
+    // Build icacls command: icacls "dir" /grant *S-1-15-2-1:(OI)(CI)(RX) /T /Q
+    std::wstring cmd = L"icacls \"" + dir + L"\" /grant *S-1-15-2-1:(OI)(CI)(RX) /T /Q";
+    
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;  // Hidden window - no black CMD popup
+    
+    PROCESS_INFORMATION pi = {0};
+    
+    // Need to use cmd.exe to run icacls
+    std::wstring full_cmd = L"cmd.exe /c " + cmd;
+    std::vector<wchar_t> cmd_buffer(full_cmd.begin(), full_cmd.end());
+    cmd_buffer.push_back(L'\0');
+    
+    if (::CreateProcessW(
+            nullptr,
+            cmd_buffer.data(),
+            nullptr, nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,  // No window at all
+            nullptr, nullptr,
+            &si, &pi)) {
+      // Wait for completion (max 30 seconds)
+      ::WaitForSingleObject(pi.hProcess, 30000);
+      ::CloseHandle(pi.hProcess);
+      ::CloseHandle(pi.hThread);
+      result = ERROR_SUCCESS;
+    }
+  }
+
+  // Cleanup
+  ::LocalFree(pNewDacl);
+  ::LocalFree(pSid);
+  ::LocalFree(pSD);
+  
+  return result == ERROR_SUCCESS;
+}
+
+// Main entry point for sandbox permission fix
+// Called once at browser startup, before sandbox initialization
+void EnsureSandboxPermissions() {
+  // Only run for browser process (not renderer, GPU, etc.)
+  // Note: At this early stage, we check command line for --type= switch
+  // since InitializeProcessType() hasn't been called yet
+  LPWSTR cmd_line = ::GetCommandLineW();
+  if (cmd_line && wcsstr(cmd_line, L"--type=")) {
+    return;  // This is a child process, skip
+  }
+
+  std::wstring exe_dir = GetExeDirectory();
+  if (exe_dir.empty()) {
+    return;
+  }
+
+  // Check if we've already done this for this directory
+  if (HasPermissionMarker(exe_dir)) {
+    return;  // Already granted, skip
+  }
+
+  // Grant permissions to ALL APPLICATION PACKAGES
+  if (GrantAppContainerPermissions(exe_dir)) {
+    // Success! Create marker file to avoid running again
+    CreatePermissionMarker(exe_dir);
+  }
+  // If failed, we'll try again next time (no marker created)
+}
+
+// =============================================================================
+// END PORTABLE SANDBOX PERMISSION FIX
+// =============================================================================
 
 // Sets the current working directory for the process to the directory holding
 // the executable if this is the browser process. This avoids leaking a handle
@@ -244,6 +478,12 @@ int main() {
 #endif  // defined(ARCH_CPU_32_BITS)
 
   SetCwdForBrowserProcess();
+  
+  // PORTABLE SANDBOX FIX: Ensure sandbox permissions for portable deployments.
+  // This grants Read/Execute permissions to "ALL APPLICATION PACKAGES" group
+  // so that AppContainer sandbox can access the browser directory.
+  EnsureSandboxPermissions();
+  
   install_static::InitializeFromPrimaryModule();
   SignalInitializeCrashReporting();
   if (IsBrowserProcess())

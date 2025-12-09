@@ -30,18 +30,57 @@
 namespace blink {
 
 namespace {
-// Helper to apply fonts noise if the --fonts-noise flag is enabled
-double ApplyFontsNoise(double value) {
+
+// Micro-noise for font metrics fingerprinting protection.
+// 
+// DESIGN PRINCIPLE:
+// - Visual: Human eye sees IDENTICAL text (no kerning issues, no line breaks)
+// - Detection: JS measureText() returns slightly different values → different hash
+//
+// The noise amplitude is 0.0001px (100 nanopixels), which is:
+// - 10,000x smaller than a pixel
+// - Invisible to human eye (needs 10,000+ chars to shift 1px)
+// - But changes hash because JS uses full double precision
+//
+// Example: 
+//   Original: width = 123.456789 px
+//   Noised:   width = 123.456789 ± 0.0001 px = 123.4568xx px
+//   Hash changes because 123.456789 != 123.456832 in JS
+
+// Deterministic micro-noise: same input → same output (prevents text jitter)
+double ApplyMicroNoise(double value, uint64_t context_hash = 0) {
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   if (!command_line || !command_line->HasSwitch("fonts-noise")) {
     return value;
   }
 
-  // Use session cache with smaller noise range for fonts
-  double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(
-      value, -0.5, 0.5);
+  // Get seed from session cache (persisted per-profile)
+  uint64_t seed = SessionNoiseCache::GetInstance().GetFontsNoiseSeed();
+  if (seed == 0) {
+    seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+  }
+
+  // Create deterministic hash from: seed + value + context
+  // This ensures same value always gets same noise (no jitter on hover/redraw)
+  uint64_t value_bits = *reinterpret_cast<const uint64_t*>(&value);
+  uint64_t hash = seed ^ (value_bits * 0x9e3779b97f4a7c15ULL) ^ context_hash;
+
+  // Use simple LCG for fast deterministic pseudo-random
+  // Range: [-0.0001, +0.0001] px (100 nanopixels - completely invisible)
+  constexpr double kMicroNoiseAmplitude = 0.0001;  // 0.1 sub-pixel
+  
+  // Map hash to [-1, +1] then scale to micro-noise range
+  double normalized = (static_cast<double>(hash & 0xFFFFFFFF) / 0x7FFFFFFF) - 1.0;
+  double noise = normalized * kMicroNoiseAmplitude;
+
   return value + noise;
 }
+
+// Legacy function for backward compatibility
+double ApplyFontsNoise(double value) {
+  return ApplyMicroNoise(value);
+}
+
 }  // namespace
 
 constexpr int kHangingAsPercentOfAscent = 80;

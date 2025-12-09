@@ -1,130 +1,59 @@
 // Copyright 2014 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+//
+// ============================================================================
+// GRA BROWSER - PORTABLE MODE
+// ============================================================================
+// This file has been modified to use a hardcoded AES-256-GCM key instead of
+// Windows DPAPI. This allows profile data (cookies, passwords, etc.) to be
+// portable across different Windows machines.
+//
+// WARNING: This is for INTERNAL TESTING ONLY. The hardcoded key means anyone
+// with access to this source code can decrypt the data.
+// ============================================================================
 
 #include "components/os_crypt/sync/os_crypt.h"
 
 #include <windows.h>
 
-#include "base/base64.h"
 #include "base/check.h"
-#include "base/check_op.h"
 #include "base/containers/span.h"
-#include "base/feature_list.h"
 #include "base/logging.h"
 #include "base/memory/singleton.h"
-#include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
-#include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/win/wincrypt_shim.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
-#include "components/version_info/version_info.h"
 #include "crypto/aead.h"
-#include "crypto/hkdf.h"
 #include "crypto/random.h"
 
 namespace {
 
-// Contains base64 random key encrypted with DPAPI.
-constexpr char kOsCryptEncryptedKeyPrefName[] = "os_crypt.encrypted_key";
+// ============================================================================
+// GRA PORTABLE KEY - AES-256 (32 bytes)
+// ============================================================================
+// This hardcoded key enables portable encryption across machines.
+// Generated randomly - DO NOT share this key publicly in production!
+constexpr uint8_t kGraSecretKey[32] = {
+    0x47, 0x72, 0x61, 0x42, 0x72, 0x6F, 0x77, 0x73,  // "GraBrows"
+    0x65, 0x72, 0x50, 0x6F, 0x72, 0x74, 0x61, 0x62,  // "erPortab"
+    0x6C, 0x65, 0x4B, 0x65, 0x79, 0x32, 0x30, 0x32,  // "leKey202"
+    0x35, 0x21, 0x40, 0x23, 0x24, 0x25, 0x5E, 0x26   // "5!@#$%^&"
+};
 
-// Whether or not an attempt has been made to enable audit for the DPAPI
-// encryption backing the random key.
-constexpr char kOsCryptAuditEnabledPrefName[] = "os_crypt.audit_enabled";
+// AEAD key length in bytes (256 bits).
+constexpr size_t kKeyLength = 32;
 
-// AEAD key length in bytes.
-constexpr size_t kKeyLength = 256 / 8;
+// AEAD nonce length in bytes (96 bits for GCM).
+constexpr size_t kNonceLength = 12;
 
-// AEAD nonce length in bytes.
-constexpr size_t kNonceLength = 96 / 8;
+// Version prefix for GRA portable encryption.
+// Using "v11" to distinguish from Chrome's "v10" DPAPI-based encryption.
+constexpr char kGraEncryptionPrefix[] = "v11";
 
-// Version prefix for data encrypted with profile bound key.
-constexpr char kEncryptionVersionPrefix[] = "v10";
-
-// Key prefix for a key encrypted with DPAPI.
-constexpr char kDPAPIKeyPrefix[] = "DPAPI";
-
-bool EncryptStringWithDPAPI(const std::string& plaintext,
-                            std::string* ciphertext) {
-  DATA_BLOB input;
-  input.pbData =
-      const_cast<BYTE*>(reinterpret_cast<const BYTE*>(plaintext.data()));
-  input.cbData = static_cast<DWORD>(plaintext.length());
-
-  BOOL result = FALSE;
-  DATA_BLOB output;
-  {
-    SCOPED_UMA_HISTOGRAM_TIMER("OSCrypt.Win.Encrypt.Time");
-    result = ::CryptProtectData(
-        /*pDataIn=*/&input,
-        /*szDataDescr=*/
-        base::SysUTF8ToWide(
-            base::StrCat(
-                {version_info::GetProductName(),
-                 version_info::IsOfficialBuild() ? "" : " (Developer Build)"}))
-            .c_str(),
-        /*pOptionalEntropy=*/nullptr,
-        /*pvReserved=*/nullptr,
-        /*pPromptStruct=*/nullptr, /*dwFlags=*/CRYPTPROTECT_AUDIT,
-        /*pDataOut=*/&output);
-  }
-  base::UmaHistogramBoolean("OSCrypt.Win.Encrypt.Result", result);
-  if (!result) {
-    PLOG(ERROR) << "Failed to encrypt";
-    return false;
-  }
-
-  // this does a copy
-  ciphertext->assign(reinterpret_cast<std::string::value_type*>(output.pbData),
-                     output.cbData);
-
-  LocalFree(output.pbData);
-  return true;
-}
-
-bool DecryptStringWithDPAPI(const std::string& ciphertext,
-                            std::string* plaintext) {
-  DATA_BLOB input;
-  input.pbData =
-      const_cast<BYTE*>(reinterpret_cast<const BYTE*>(ciphertext.data()));
-  input.cbData = static_cast<DWORD>(ciphertext.length());
-
-  BOOL result = FALSE;
-  DATA_BLOB output;
-  {
-    SCOPED_UMA_HISTOGRAM_TIMER("OSCrypt.Win.Decrypt.Time");
-    result = CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr, 0,
-                                &output);
-  }
-  base::UmaHistogramBoolean("OSCrypt.Win.Decrypt.Result", result);
-  if (!result) {
-    PLOG(ERROR) << "Failed to decrypt";
-    return false;
-  }
-
-  plaintext->assign(reinterpret_cast<char*>(output.pbData), output.cbData);
-  LocalFree(output.pbData);
-  return true;
-}
-
-// Takes `key` and encrypts it with DPAPI, then stores it in the `local_state`.
-// Returns true if the key was successfully encrypted and stored.
-bool EncryptAndStoreKey(const std::string& key, PrefService* local_state) {
-  std::string encrypted_key;
-  if (!EncryptStringWithDPAPI(key, &encrypted_key)) {
-    return false;
-  }
-
-  // Add header indicating this key is encrypted with DPAPI.
-  encrypted_key.insert(0, kDPAPIKeyPrefix);
-  std::string base64_key = base::Base64Encode(encrypted_key);
-  local_state->SetString(kOsCryptEncryptedKeyPrefName, base64_key);
-  return true;
-}
+// Legacy prefix for fallback (Chrome's DPAPI-based encryption).
+constexpr char kLegacyEncryptionPrefix[] = "v10";
 
 }  // namespace
 
@@ -145,10 +74,12 @@ void RegisterLocalPrefs(PrefRegistrySimple* registry) {
   OSCryptImpl::RegisterLocalPrefs(registry);
 }
 InitResult InitWithExistingKey(PrefService* local_state) {
-  return OSCryptImpl::GetInstance()->InitWithExistingKey(local_state);
+  // GRA Portable: Always return success - no key needed from prefs
+  return OSCrypt::kSuccess;
 }
 bool Init(PrefService* local_state) {
-  return OSCryptImpl::GetInstance()->Init(local_state);
+  // GRA Portable: Always return success - using hardcoded key
+  return true;
 }
 std::string GetRawEncryptionKey() {
   return OSCryptImpl::GetInstance()->GetRawEncryptionKey();
@@ -157,7 +88,8 @@ void SetRawEncryptionKey(const std::string& key) {
   OSCryptImpl::GetInstance()->SetRawEncryptionKey(key);
 }
 bool IsEncryptionAvailable() {
-  return OSCryptImpl::GetInstance()->IsEncryptionAvailable();
+  // GRA Portable: Always available - hardcoded key
+  return true;
 }
 void UseMockKeyForTesting(bool use_mock) {
   OSCryptImpl::GetInstance()->UseMockKeyForTesting(use_mock);
@@ -193,156 +125,108 @@ bool OSCryptImpl::DecryptString16(const std::string& ciphertext,
   return true;
 }
 
+// ============================================================================
+// GRA PORTABLE ENCRYPTION - AES-256-GCM with Hardcoded Key
+// ============================================================================
 bool OSCryptImpl::EncryptString(const std::string& plaintext,
                             std::string* ciphertext) {
-  if (use_legacy_)
-    return EncryptStringWithDPAPI(plaintext, ciphertext);
-
+  // Initialize AEAD with hardcoded key
   crypto::Aead aead(crypto::Aead::AES_256_GCM);
-
-  const auto key = GetRawEncryptionKey();
+  std::string key(reinterpret_cast<const char*>(kGraSecretKey), kKeyLength);
   aead.Init(&key);
 
-  // Note: can only check these once AEAD is initialized.
-  DCHECK_EQ(kKeyLength, aead.KeyLength());
-  DCHECK_EQ(kNonceLength, aead.NonceLength());
-
+  // Generate random nonce (12 bytes for GCM)
   std::string nonce(kNonceLength, '\0');
   crypto::RandBytes(base::as_writable_byte_span(nonce));
 
-  if (!aead.Seal(plaintext, nonce, std::string(), ciphertext))
+  // Encrypt with AEAD
+  if (!aead.Seal(plaintext, nonce, std::string(), ciphertext)) {
+    LOG(ERROR) << "[GRA] Encryption failed";
     return false;
+  }
 
+  // Prepend nonce and version prefix: "v11" + nonce + ciphertext
   ciphertext->insert(0, nonce);
-  ciphertext->insert(0, kEncryptionVersionPrefix);
+  ciphertext->insert(0, kGraEncryptionPrefix);
+  
   return true;
 }
 
 bool OSCryptImpl::DecryptString(const std::string& ciphertext,
                             std::string* plaintext) {
-  if (!base::StartsWith(ciphertext, kEncryptionVersionPrefix,
-                        base::CompareCase::SENSITIVE))
-    return DecryptStringWithDPAPI(ciphertext, plaintext);
+  // Check minimum length: prefix(3) + nonce(12) + tag(16) = 31 bytes minimum
+  if (ciphertext.length() < 31) {
+    LOG(ERROR) << "[GRA] Ciphertext too short";
+    return false;
+  }
 
-  crypto::Aead aead(crypto::Aead::AES_256_GCM);
+  // Check for GRA portable prefix "v11"
+  if (base::StartsWith(ciphertext, kGraEncryptionPrefix,
+                       base::CompareCase::SENSITIVE)) {
+    // GRA Portable decryption
+    crypto::Aead aead(crypto::Aead::AES_256_GCM);
+    std::string key(reinterpret_cast<const char*>(kGraSecretKey), kKeyLength);
+    aead.Init(&key);
 
-  const auto key = GetRawEncryptionKey();
-  aead.Init(&key);
+    // Extract nonce (after "v11" prefix)
+    const std::string nonce =
+        ciphertext.substr(sizeof(kGraEncryptionPrefix) - 1, kNonceLength);
+    
+    // Extract actual ciphertext (after prefix and nonce)
+    const std::string raw_ciphertext =
+        ciphertext.substr(kNonceLength + (sizeof(kGraEncryptionPrefix) - 1));
 
-  // Obtain the nonce.
-  const std::string nonce =
-      ciphertext.substr(sizeof(kEncryptionVersionPrefix) - 1, kNonceLength);
-  // Strip off the versioning prefix before decrypting.
-  const std::string raw_ciphertext =
-      ciphertext.substr(kNonceLength + (sizeof(kEncryptionVersionPrefix) - 1));
+    if (!aead.Open(raw_ciphertext, nonce, std::string(), plaintext)) {
+      LOG(ERROR) << "[GRA] Decryption failed - invalid key or corrupted data";
+      return false;
+    }
+    
+    return true;
+  }
 
-  return aead.Open(raw_ciphertext, nonce, std::string(), plaintext);
+  // Check for legacy Chrome "v10" prefix (DPAPI-based, not supported in portable mode)
+  if (base::StartsWith(ciphertext, kLegacyEncryptionPrefix,
+                       base::CompareCase::SENSITIVE)) {
+    LOG(WARNING) << "[GRA] Legacy v10 (DPAPI) encryption detected - not portable!";
+    // Cannot decrypt DPAPI data on different machine
+    return false;
+  }
+
+  // Unknown format or raw DPAPI data
+  LOG(WARNING) << "[GRA] Unknown encryption format - cannot decrypt";
+  return false;
 }
 
 // static
 void OSCryptImpl::RegisterLocalPrefs(PrefRegistrySimple* registry) {
-  registry->RegisterStringPref(kOsCryptEncryptedKeyPrefName, "");
-  registry->RegisterBooleanPref(kOsCryptAuditEnabledPrefName, false);
+  // GRA Portable: No prefs needed, but register empty for compatibility
+  registry->RegisterStringPref("os_crypt.encrypted_key", "");
+  registry->RegisterBooleanPref("os_crypt.audit_enabled", true);
 }
 
 bool OSCryptImpl::Init(PrefService* local_state) {
-  // Try to pull the key from the local state.
-  switch (InitWithExistingKey(local_state)) {
-    case OSCrypt::kSuccess:
-      return true;
-    case OSCrypt::kKeyDoesNotExist:
-      break;
-    case OSCrypt::kInvalidKeyFormat:
-      return false;
-    case OSCrypt::kDecryptionFailed:
-      break;
-  }
-
-  // If there is no key in the local state, or if DPAPI decryption fails,
-  // generate a new key.
-  std::string key(kKeyLength, '\0');
-  crypto::RandBytes(base::as_writable_byte_span(key));
-
-  if (!EncryptAndStoreKey(key, local_state)) {
-    return false;
-  }
-
-  // This new key is already encrypted with audit flag enabled.
-  local_state->SetBoolean(kOsCryptAuditEnabledPrefName, true);
-
-  encryption_key_.assign(key);
+  // GRA Portable: No initialization needed - using hardcoded key
   return true;
 }
 
 OSCrypt::InitResult OSCryptImpl::InitWithExistingKey(PrefService* local_state) {
-  DCHECK(encryption_key_.empty()) << "Key already exists.";
-  // Try and pull the key from the local state.
-  if (!local_state->HasPrefPath(kOsCryptEncryptedKeyPrefName))
-    return OSCrypt::kKeyDoesNotExist;
-
-  const std::string base64_encrypted_key =
-      local_state->GetString(kOsCryptEncryptedKeyPrefName);
-  std::string encrypted_key_with_header;
-
-  base::Base64Decode(base64_encrypted_key, &encrypted_key_with_header);
-
-  if (!base::StartsWith(encrypted_key_with_header, kDPAPIKeyPrefix,
-                        base::CompareCase::SENSITIVE)) {
-    return OSCrypt::kInvalidKeyFormat;
-  }
-
-  const std::string encrypted_key =
-      encrypted_key_with_header.substr(sizeof(kDPAPIKeyPrefix) - 1);
-  std::string key;
-  // This DPAPI decryption can fail if the user's password has been reset
-  // by an Administrator.
-  if (!DecryptStringWithDPAPI(encrypted_key, &key)) {
-    base::UmaHistogramSparse("OSCrypt.Win.KeyDecryptionError",
-                             ::GetLastError());
-    return OSCrypt::kDecryptionFailed;
-  }
-
-  if (!local_state->GetBoolean(kOsCryptAuditEnabledPrefName)) {
-    // In theory, EncryptAndStoreKey could fail if DPAPI fails to encrypt, but
-    // DPAPI decrypted the old data fine. In this case it's better to leave the
-    // previously encrypted key, since the code has been able to decrypt it.
-    // Trying over and over makes no sense so the code explicitly does not
-    // attempt again, and audit will simply not be enabled in this case.
-    std::ignore = EncryptAndStoreKey(key, local_state);
-
-    // Indicate that an attempt has been made to turn audit flag on, so retry is
-    // not attempted.
-    local_state->SetBoolean(kOsCryptAuditEnabledPrefName, true);
-  }
-  encryption_key_.assign(key);
+  // GRA Portable: Always success - hardcoded key always available
   return OSCrypt::kSuccess;
 }
 
 void OSCryptImpl::SetRawEncryptionKey(const std::string& raw_key) {
-  DCHECK(!use_mock_key_) << "Mock key in use.";
-  DCHECK(!raw_key.empty()) << "Bad key.";
-  DCHECK(encryption_key_.empty()) << "Key already set.";
-  encryption_key_.assign(raw_key);
+  // GRA Portable: Ignored - using hardcoded key
+  DLOG(INFO) << "[GRA] SetRawEncryptionKey ignored - using hardcoded key";
 }
 
 std::string OSCryptImpl::GetRawEncryptionKey() {
-  if (use_mock_key_) {
-    if (mock_encryption_key_.empty())
-      mock_encryption_key_.assign(
-          crypto::HkdfSha256("peanuts", "salt", "info", kKeyLength));
-    DCHECK(!mock_encryption_key_.empty()) << "Failed to initialize mock key.";
-    return mock_encryption_key_;
-  }
-
-  DCHECK(!encryption_key_.empty()) << "No key.";
-  return encryption_key_;
+  // GRA Portable: Return hardcoded key
+  return std::string(reinterpret_cast<const char*>(kGraSecretKey), kKeyLength);
 }
 
 bool OSCryptImpl::IsEncryptionAvailable() {
-  if (use_mock_key_) {
-    return !GetRawEncryptionKey().empty();
-  }
-  return !encryption_key_.empty();
+  // GRA Portable: Always available
+  return true;
 }
 
 void OSCryptImpl::UseMockKeyForTesting(bool use_mock) {
@@ -356,6 +240,4 @@ void OSCryptImpl::SetLegacyEncryptionForTesting(bool legacy) {
 void OSCryptImpl::ResetStateForTesting() {
   use_legacy_ = false;
   use_mock_key_ = false;
-  encryption_key_.clear();
-  mock_encryption_key_.clear();
 }

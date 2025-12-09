@@ -11,6 +11,7 @@
 #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
 #include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 
 #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_WIN)
 #include <sys/utsname.h>
@@ -46,6 +47,10 @@ NavigatorBase::NavigatorBase(ExecutionContext* context)
     : NavigatorLanguage(context), ExecutionContextClient(context) {}
 
 String NavigatorBase::userAgent() const {
+  const std::string& override_ua = SessionNoiseCache::GetInstance().GetUserAgent();
+  if (!override_ua.empty()) {
+    return String::FromUTF8(override_ua);
+  }
   ExecutionContext* execution_context = GetExecutionContext();
   return execution_context ? execution_context->UserAgent() : String();
 }

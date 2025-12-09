@@ -23,7 +23,8 @@ namespace {
 constexpr uint64_t kFnvPrime = 0x00000100000001b3;
 }  // namespace
 
-NoiseHash::NoiseHash(NoiseToken token) : token_hash_(token.Value()) {}
+NoiseHash::NoiseHash(NoiseToken token) 
+    : token_hash_(token.Value()), remaining_bits_(64) {}
 
 void NoiseHash::Update(const uint64_t value) {
   token_hash_ ^= value;

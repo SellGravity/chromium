@@ -13,6 +13,7 @@
 
 #include "base/check.h"
 #include "base/check_op.h"
+#include "base/command_line.h"
 #include "base/location.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
@@ -48,6 +49,7 @@
 #include "third_party/blink/renderer/core/event_type_names.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_font_cache.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_performance_monitor.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context_host.h"
@@ -489,8 +491,19 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
 
   bool noised = false;
   if (snapshot) {
-    noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
-        GetTopExecutionContext(), snapshot);
+    // Check for custom canvas-noise flag FIRST (takes priority, faster)
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
+    
+    if (use_custom_noise) {
+      // Custom noise is applied directly to ImageData below, not snapshot
+      // This avoids expensive StaticBitmapImage recreation
+      noised = true;
+    } else {
+      // Fallback to Chromium's canvas interventions
+      noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
+          GetTopExecutionContext(), snapshot);
+    }
   }
   TRACE_EVENT_INSTANT(
       TRACE_DISABLED_BY_DEFAULT("identifiability.high_entropy_api"),
@@ -553,6 +566,28 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
       SkIRect bounds =
           snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
+    }
+    
+    // Apply custom noise directly to ImageData pixels (more efficient)
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("canvas-noise") && read_pixels_successful) {
+      uint8_t* pixels = static_cast<uint8_t*>(image_data_pixmap.writable_addr());
+      size_t pixel_count = static_cast<size_t>(sw) * static_cast<size_t>(sh);
+      int bytes_per_pixel = image_data_pixmap.info().bytesPerPixel();
+      
+      for (size_t i = 0; i < pixel_count; ++i) {
+        size_t byte_index = i * bytes_per_pixel;
+        // Add noise to RGB channels only (skip alpha)
+        for (int channel = 0; channel < 3 && channel < bytes_per_pixel; ++channel) {
+          double current_value = static_cast<double>(pixels[byte_index + channel]);
+          double cache_key = current_value * 10.0 + channel;
+          double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(
+              cache_key, -3.0, 3.0);
+          int new_value = static_cast<int>(current_value + noise);
+          pixels[byte_index + channel] = static_cast<uint8_t>(
+              std::max(0, std::min(255, new_value)));
+        }
+      }
     }
   }
 

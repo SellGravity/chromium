@@ -232,9 +232,18 @@ const SimpleFontData* FontCache::GetFontData(
     const FontDescription& font_description,
     const AtomicString& family,
     AlternateFontName altername_font_name) {
-  // FONT SUBSTITUTION: Replace specific fonts (1-9 per profile) for
-  // fingerprinting protection, but allow all other fonts to work normally.
-  // This prevents breaking website rendering while still providing protection.
+  // NOTE: Font substitution (replacing actual font) is DISABLED because it
+  // causes rendering issues (kerning, line breaks, visual glitches).
+  //
+  // Instead, we use "Micro-Noise" approach in TextMetrics:
+  // - Render: Use ORIGINAL font (perfect visual)
+  // - API (measureText): Return slightly noised values (different fingerprint)
+  //
+  // To re-enable font substitution, uncomment the block below.
+  // But be aware: it WILL break website UX for some fonts.
+  
+  /*
+  // FONT SUBSTITUTION (DISABLED - causes UX issues):
   AtomicString final_family = family;
 
   if (FontSubstitutionCache::GetInstance().IsInitialized()) {
@@ -246,8 +255,11 @@ const SimpleFontData* FontCache::GetFontData(
       // Font is being substituted - use replacement font
       final_family = AtomicString(substituted);
     }
-    // If no substitution found, use original font (allows normal rendering)
   }
+  */
+  
+  // Use original font for perfect rendering
+  AtomicString final_family = family;
 
   if (const FontPlatformData* platform_data = GetFontPlatformData(
           font_description,

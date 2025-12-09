@@ -230,45 +230,32 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
   // Apply audio fingerprinting protection on EVERY access
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   if (channel_data && command_line && command_line->HasSwitch("audio-noise")) {
-    LOG(INFO) << "AudioBuffer: Applying audio noise protection";
-
     float* data = channel_data->Data();
     size_t length = channel_data->length();
 
     if (data && length > 0) {
       AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
 
-      LOG(INFO) << "AudioBuffer: Applying noise to buffer, length=" << length;
-
       // Optimized: Only noise 8 samples at start and end (16 total)
-      // Using LARGE noise (±1.0) for debugging
+      // Using micro-noise (±0.0001) for imperceptible audio modification
+      constexpr float kNoiseRange = 0.0001f;
+      
       if (length <= 16) {
         // Very small buffer: Add noise to all samples
         for (size_t i = 0; i < length; ++i) {
-          // ✅ Use sample value as cache key for deterministic noise
-          float noise = noise_gen.GetNoise(data[i], -1.0f, 1.0f);
+          float noise = noise_gen.GetNoise(data[i], -kNoiseRange, kNoiseRange);
           data[i] += noise;
-          if (i < 3) {
-            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ", cached)";
-          }
         }
       } else {
         // Larger buffer: Add noise to first 8 and last 8 samples only
         for (size_t i = 0; i < 8; ++i) {
-          // ✅ Use sample value as cache key
-          float noise = noise_gen.GetNoise(data[i], -1.0f, 1.0f);
+          float noise = noise_gen.GetNoise(data[i], -kNoiseRange, kNoiseRange);
           data[i] += noise;
-          if (i < 3) {
-            LOG(INFO) << "AudioBuffer: sample[" << i << "]=" << data[i] << " (noise=" << noise << ", cached)";
-          }
         }
         for (size_t i = length - 8; i < length; ++i) {
-          // ✅ Use sample value as cache key
-          data[i] += noise_gen.GetNoise(data[i], -1.0f, 1.0f);
+          data[i] += noise_gen.GetNoise(data[i], -kNoiseRange, kNoiseRange);
         }
       }
-    } else {
-      LOG(INFO) << "AudioBuffer: data is null or length is 0";
     }
   }
 

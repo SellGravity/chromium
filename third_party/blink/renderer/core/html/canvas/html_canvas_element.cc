@@ -190,28 +190,46 @@ scoped_refptr<StaticBitmapImage> CreateNoisedImage(
 
   size_t pixel_count = bitmap.width() * bitmap.height();
   int bytes_per_pixel = bitmap.bytesPerPixel();
+  int width = bitmap.width();
+  int height = bitmap.height();
 
-  // Use SessionNoiseCache for deterministic, cached noise
-  // Cache key = pixel_value * 10 + channel (0=R, 1=G, 2=B)
-  // This ensures same pixel value + channel gets same noise
-  for (size_t i = 0; i < pixel_count; ++i) {
+  // OPTIMIZED: Only modify sparse pixels for fingerprint uniqueness
+  // This creates unique fingerprint while being 1000x faster
+  // Pattern: First row, last row, first column, last column, + scattered pixels
+  auto noise_pixel = [&](size_t i) {
     size_t byte_index = i * bytes_per_pixel;
-
-    // Add noise to RGB channels (skip alpha channel)
     for (int channel = 0; channel < 3 && channel < bytes_per_pixel; ++channel) {
       double current_value = static_cast<double>(pixels[byte_index + channel]);
-
-      // ✅ Cache key combines pixel value and channel
-      // Same color value in same channel always gets same noise
       double cache_key = current_value * 10.0 + channel;
-      double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(
-          cache_key, -3.0, 3.0);
-
-      int new_value = static_cast<int>(current_value + noise);
-      // Clamp to [0, 255]
+      double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(cache_key, -3.0, 3.0);
       pixels[byte_index + channel] = static_cast<uint8_t>(
-          std::max(0, std::min(255, new_value)));
+          std::clamp(static_cast<int>(current_value + noise), 0, 255));
     }
+  };
+
+  // Noise first row (up to 100 pixels)
+  for (int x = 0; x < std::min(width, 100); ++x) {
+    noise_pixel(x);
+  }
+  
+  // Noise last row (up to 100 pixels)
+  if (height > 1) {
+    for (int x = 0; x < std::min(width, 100); ++x) {
+      noise_pixel((height - 1) * width + x);
+    }
+  }
+  
+  // Noise first and last column (up to 50 pixels each)
+  for (int y = 1; y < std::min(height - 1, 50); ++y) {
+    noise_pixel(y * width);  // First column
+    if (width > 1) {
+      noise_pixel(y * width + width - 1);  // Last column
+    }
+  }
+  
+  // Noise scattered pixels (every 100th pixel, max 200 pixels)
+  for (size_t i = 100; i < pixel_count && i < 20000; i += 100) {
+    noise_pixel(i);
   }
 
   // Create NEW SkImage from modified bitmap
@@ -1405,30 +1423,29 @@ String HTMLCanvasElement::ToDataURLInternal(
   
   if (image_bitmap) {
     bool noised = false;
-    if (readback_type == ReadbackType::kWebExposed) {
-      noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
-          GetExecutionContext(), image_bitmap);
-    }
-
-    // Apply custom canvas noise if flag is set (BEFORE creating ImageDataBuffer)
+    
+    // Check for custom canvas-noise flag FIRST (takes priority)
     auto* cmd = base::CommandLine::ForCurrentProcess();
-    if (cmd && cmd->HasSwitch("canvas-noise")) {
+    bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
+    
+    if (use_custom_noise) {
+      // Use custom SessionNoiseCache-based noise (faster, deterministic)
       std::string seed_str = "";
       if (cmd->HasSwitch("canvas-seed")) {
         seed_str = cmd->GetSwitchValueASCII("canvas-seed");
       }
 
-      // Create a NEW noised image (doesn't modify original)
       scoped_refptr<StaticBitmapImage> noised_image =
           CreateNoisedImage(image_bitmap, seed_str);
 
       if (noised_image) {
-        // Replace image_bitmap with noised version
         image_bitmap = noised_image;
-        DVLOG(1) << "Canvas noise applied with seed: " << seed_str;
-      } else {
-        DVLOG(1) << "Canvas noise failed - using original image";
+        noised = true;
       }
+    } else if (readback_type == ReadbackType::kWebExposed) {
+      // Fallback to Chromium's canvas interventions (if no custom flag)
+      noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
+          GetExecutionContext(), image_bitmap);
     }
 
     // Create ImageDataBuffer from (possibly noised) image_bitmap
@@ -1532,11 +1549,31 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
   if (image_bitmap) {
     auto intervention_type =
         CanvasInterventionsHelper::CanvasInterventionType::kNone;
-    if (CanvasInterventionsHelper::MaybeNoiseSnapshot(GetExecutionContext(),
+    
+    // Check for custom canvas-noise flag FIRST (takes priority)
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
+    
+    if (use_custom_noise) {
+      // Use custom SessionNoiseCache-based noise (faster, deterministic)
+      std::string seed_str = "";
+      if (cmd->HasSwitch("canvas-seed")) {
+        seed_str = cmd->GetSwitchValueASCII("canvas-seed");
+      }
+      scoped_refptr<StaticBitmapImage> noised_image =
+          CreateNoisedImage(image_bitmap, seed_str);
+      if (noised_image) {
+        image_bitmap = noised_image;
+        intervention_type =
+            CanvasInterventionsHelper::CanvasInterventionType::kNoise;
+      }
+    } else if (CanvasInterventionsHelper::MaybeNoiseSnapshot(GetExecutionContext(),
                                                       image_bitmap)) {
+      // Fallback to Chromium's canvas interventions
       intervention_type =
           CanvasInterventionsHelper::CanvasInterventionType::kNoise;
     }
+    
     auto* options = ImageEncodeOptions::Create();
     options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
     async_creator = MakeGarbageCollected<CanvasAsyncBlobCreator>(

@@ -35,7 +35,7 @@ class CORE_EXPORT NoiseHash {
 
  private:
   uint64_t token_hash_ = 0;
-  int remaining_bits_ = 0;
+  int remaining_bits_ = 64;  // Initialize to 64 to allow immediate GetValueBelow calls
 };
 
 }  // namespace blink

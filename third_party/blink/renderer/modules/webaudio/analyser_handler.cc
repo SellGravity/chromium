@@ -220,6 +220,7 @@ void AnalyserHandler::CheckNumberOfChannelsForInput(AudioNodeInput* input) {
 }
 
 // Helper function to apply fingerprinting noise to frequency data
+// OPTIMIZED: Only modify first 8 + last 8 samples (enough for fingerprint uniqueness)
 void AnalyserHandler::ApplyFrequencyDataNoise(DOMUint8Array* frequency_data) {
   auto* command_line = base::CommandLine::ForCurrentProcess();
   if (!command_line || !command_line->HasSwitch("audio-noise")) {
@@ -232,18 +233,28 @@ void AnalyserHandler::ApplyFrequencyDataNoise(DOMUint8Array* frequency_data) {
   size_t length = frequency_data->length();
 
   if (data && length > 0) {
-    for (size_t i = 0; i < length; ++i) {
-      // ✅ Use data value as cache key for deterministic noise
+    // Only noise first 8 and last 8 samples for performance
+    constexpr size_t kSamplesToNoise = 8;
+    size_t samples = std::min(kSamplesToNoise, length);
+    
+    // First N samples
+    for (size_t i = 0; i < samples; ++i) {
       int noise = noise_gen.GetNoiseInt(data[i], -3, 3);
-      int noised = static_cast<int>(data[i]) + noise;
-      // Clamp to [0, 255]
-      data[i] = static_cast<uint8_t>(
-          std::max(0, std::min(255, noised)));
+      data[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(data[i]) + noise, 0, 255));
+    }
+    
+    // Last N samples (if buffer large enough)
+    if (length > kSamplesToNoise * 2) {
+      for (size_t i = length - samples; i < length; ++i) {
+        int noise = noise_gen.GetNoiseInt(data[i], -3, 3);
+        data[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(data[i]) + noise, 0, 255));
+      }
     }
   }
 }
 
 // Helper function to apply fingerprinting noise to time domain data
+// OPTIMIZED: Only modify first 8 + last 8 samples (enough for fingerprint uniqueness)
 void AnalyserHandler::ApplyTimeDomainNoise(DOMUint8Array* time_domain_data) {
   auto* command_line = base::CommandLine::ForCurrentProcess();
   if (!command_line || !command_line->HasSwitch("audio-noise")) {
@@ -256,13 +267,22 @@ void AnalyserHandler::ApplyTimeDomainNoise(DOMUint8Array* time_domain_data) {
   size_t length = time_domain_data->length();
 
   if (data && length > 0) {
-    for (size_t i = 0; i < length; ++i) {
-      // ✅ Use data value as cache key for deterministic noise
+    // Only noise first 8 and last 8 samples for performance
+    constexpr size_t kSamplesToNoise = 8;
+    size_t samples = std::min(kSamplesToNoise, length);
+    
+    // First N samples
+    for (size_t i = 0; i < samples; ++i) {
       int noise = noise_gen.GetNoiseInt(data[i], -2, 2);
-      int noised = static_cast<int>(data[i]) + noise;
-      // Clamp to [0, 255]
-      data[i] = static_cast<uint8_t>(
-          std::max(0, std::min(255, noised)));
+      data[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(data[i]) + noise, 0, 255));
+    }
+    
+    // Last N samples (if buffer large enough)
+    if (length > kSamplesToNoise * 2) {
+      for (size_t i = length - samples; i < length; ++i) {
+        int noise = noise_gen.GetNoiseInt(data[i], -2, 2);
+        data[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(data[i]) + noise, 0, 255));
+      }
     }
   }
 }

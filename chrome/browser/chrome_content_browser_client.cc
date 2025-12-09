@@ -2756,7 +2756,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
                                         base::NumberToString(canvas_seed));
       }
 
-      // Fingerprinting protection: Unicode Glyphs noise seed persistence
+      // Fingerprinting protection: Fonts/Unicode Glyphs noise seed persistence
       if (browser_command_line.HasSwitch("fonts-noise")) {
         uint64_t glyphs_seed = prefs->GetUint64(prefs::kUnicodeGlyphsNoiseSeed);
         if (glyphs_seed == 0) {
@@ -2770,6 +2770,38 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
         // Pass seed to renderer
         command_line->AppendSwitchASCII("unicode-glyphs-seed",
                                         base::NumberToString(glyphs_seed));
+      }
+
+      // Fingerprinting protection: Audio noise seed persistence
+      if (browser_command_line.HasSwitch("audio-noise")) {
+        uint64_t audio_seed = prefs->GetUint64(prefs::kAudioNoiseSeed);
+        if (audio_seed == 0) {
+          // Generate new seed and save to profile
+          std::random_device rd;
+          std::mt19937_64 gen(rd());
+          std::uniform_int_distribution<uint64_t> dis;
+          audio_seed = dis(gen);
+          prefs->SetUint64(prefs::kAudioNoiseSeed, audio_seed);
+        }
+        // Pass seed to renderer
+        command_line->AppendSwitchASCII("audio-noise-seed",
+                                        base::NumberToString(audio_seed));
+      }
+
+      // Fingerprinting protection: ClientRects noise seed persistence
+      if (browser_command_line.HasSwitch("rects-noise")) {
+        uint64_t rects_seed = prefs->GetUint64(prefs::kRectsNoiseSeed);
+        if (rects_seed == 0) {
+          // Generate new seed and save to profile
+          std::random_device rd;
+          std::mt19937_64 gen(rd());
+          std::uniform_int_distribution<uint64_t> dis;
+          rects_seed = dis(gen);
+          prefs->SetUint64(prefs::kRectsNoiseSeed, rects_seed);
+        }
+        // Pass seed to renderer
+        command_line->AppendSwitchASCII("rects-noise-seed",
+                                        base::NumberToString(rects_seed));
       }
 
       // Fingerprinting protection: Font substitution mapping

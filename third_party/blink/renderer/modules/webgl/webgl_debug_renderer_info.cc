@@ -28,6 +28,7 @@
 #include "base/command_line.h"
 #include "base/strings/string_number_conversions.h"
 #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 
 
 namespace blink {
@@ -52,8 +53,16 @@ WebGLExtensionName WebGLDebugRendererInfo::GetName() const {
 
 // ==================== WebGL Override Methods ====================
 
-// Static method to get WebGL vendor override from command line
+// Static method to get WebGL vendor override
+// Priority: 1. fingerprint_config.json  2. CLI flag  3. empty (use real)
 std::string WebGLDebugRendererInfo::GetWebGLVendorOverride() {
+  // Priority 1: Check JSON config (for portable fingerprint)
+  const std::string& json_vendor = SessionNoiseCache::GetInstance().GetWebGLVendor();
+  if (!json_vendor.empty()) {
+    return json_vendor;
+  }
+  
+  // Priority 2: Check CLI flag
   auto* command_line = base::CommandLine::ForCurrentProcess();
   if (command_line && command_line->HasSwitch("webgl-vendor")) {
     return command_line->GetSwitchValueASCII("webgl-vendor");
@@ -61,8 +70,16 @@ std::string WebGLDebugRendererInfo::GetWebGLVendorOverride() {
   return std::string();
 }
 
-// Static method to get WebGL renderer override from command line
+// Static method to get WebGL renderer override
+// Priority: 1. fingerprint_config.json  2. CLI flag  3. empty (use real)
 std::string WebGLDebugRendererInfo::GetWebGLRendererOverride() {
+  // Priority 1: Check JSON config (for portable fingerprint)
+  const std::string& json_renderer = SessionNoiseCache::GetInstance().GetWebGLRenderer();
+  if (!json_renderer.empty()) {
+    return json_renderer;
+  }
+  
+  // Priority 2: Check CLI flag
   auto* command_line = base::CommandLine::ForCurrentProcess();
   if (command_line && command_line->HasSwitch("webgl-renderer")) {
     return command_line->GetSwitchValueASCII("webgl-renderer");
@@ -106,6 +123,23 @@ std::string WebGLDebugRendererInfo::GetCanvasSeedOverride() {
     return command_line->GetSwitchValueASCII("canvas-seed");
   }
   return std::string();
+}
+
+// ==================== Plugin Spoofing ====================
+
+// Static method to get custom plugins count from command line (0-5)
+int WebGLDebugRendererInfo::GetPluginsCountOverride() {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("plugins-count")) {
+    int count = 5;  // Default: all 5 plugins
+    if (base::StringToInt(command_line->GetSwitchValueASCII("plugins-count"), &count)) {
+      // Clamp to valid range 0-5
+      if (count < 0) count = 0;
+      if (count > 5) count = 5;
+      return count;
+    }
+  }
+  return 5;  // Default: return all 5 plugins
 }
 
 // ==================== Fingerprinting Protection Flags ====================

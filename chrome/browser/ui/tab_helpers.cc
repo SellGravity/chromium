@@ -137,6 +137,8 @@
 #include "components/permissions/features.h"
 #include "components/permissions/permission_recovery_success_rate_tracker.h"
 #include "components/permissions/permission_request_manager.h"
+#include "components/policy/content/policy_blocklist_service.h"
+#include "components/policy/content/spa_url_blocklist_tab_helper.h"
 #include "components/safe_browsing/content/browser/async_check_tracker.h"
 #include "components/safe_browsing/content/browser/safe_browsing_navigation_observer.h"
 #include "components/safe_browsing/core/common/features.h"
@@ -581,6 +583,8 @@ void TabHelpers::AttachTabHelpers(WebContents* web_contents) {
             profile));
   }
   SoundContentSettingObserver::CreateForWebContents(web_contents);
+  // GraBrowser: SPA URL Blocklist TabHelper for YouTube/Facebook/Twitter etc.
+  policy::SpaUrlBlocklistTabHelper::CreateForWebContents(web_contents);
   StorageAccessAPITabHelper::CreateForWebContents(
       web_contents, StorageAccessAPIServiceFactory::GetForBrowserContext(
                         web_contents->GetBrowserContext()));

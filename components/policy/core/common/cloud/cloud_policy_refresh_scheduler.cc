@@ -71,22 +71,23 @@ const int64_t CloudPolicyRefreshScheduler::kRandomSaltDelayMaxValueMs =
 
 #else
 
+// GraBrowser: Balanced policy refresh - fast enough for sync, not too aggressive
 const int64_t CloudPolicyRefreshScheduler::kDefaultRefreshDelayMs =
-    3 * 60 * 60 * 1000;  // 3 hours.
+    30 * 1000;  // 30 seconds - good balance between sync speed and performance.
 const int64_t CloudPolicyRefreshScheduler::kUnmanagedRefreshDelayMs =
-    24 * 60 * 60 * 1000;  // 1 day.
+    60 * 1000;  // 1 minute.
 // Delay for periodic refreshes when the invalidations service is available,
 // in milliseconds.
 const int64_t CloudPolicyRefreshScheduler::kWithInvalidationsRefreshDelayMs =
-    24 * 60 * 60 * 1000;  // 1 day.
+    60 * 1000;  // 1 minute.
 const int64_t CloudPolicyRefreshScheduler::kInitialErrorRetryDelayMs =
-    5 * 60 * 1000;  // 5 minutes.
+    10 * 1000;  // 10 seconds.
 const int64_t CloudPolicyRefreshScheduler::kRefreshDelayMinMs =
-    30 * 60 * 1000;  // 30 minutes.
+    15 * 1000;  // 15 seconds minimum.
 const int64_t CloudPolicyRefreshScheduler::kRefreshDelayMaxMs =
-    24 * 60 * 60 * 1000;  // 1 day.
+    5 * 60 * 1000;  // 5 minutes max.
 const int64_t CloudPolicyRefreshScheduler::kRandomSaltDelayMaxValueMs =
-    5 * 60 * 1000;  // 5 minutes.
+    5 * 1000;  // 5 seconds.
 
 #endif
 

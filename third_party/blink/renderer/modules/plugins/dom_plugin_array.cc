@@ -28,6 +28,7 @@
 #include "third_party/blink/renderer/core/page/plugin_data.h"
 #include "third_party/blink/renderer/modules/plugins/dom_mime_type_array.h"
 #include "third_party/blink/renderer/modules/plugins/navigator_plugins.h"
+#include "third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -35,9 +36,29 @@
 namespace blink {
 
 namespace {
-DOMPlugin* MakeFakePlugin(String plugin_name, LocalDOMWindow* window) {
-  String description = "Portable Document Format";
-  String filename = "internal-pdf-viewer";
+
+// ========== ANTI-DETECTION: Standard Plugin Definitions ==========
+// These are common plugins seen on real browsers
+struct PluginDefinition {
+  const char* name;
+  const char* description;
+  const char* filename;
+};
+
+// Standard plugins list - matches what real Chrome reports
+static const PluginDefinition kStandardPlugins[] = {
+    {"PDF Viewer", "Portable Document Format", "internal-pdf-viewer"},
+    {"Chrome PDF Viewer", "Portable Document Format", "internal-pdf-viewer"},
+    {"Chromium PDF Viewer", "Portable Document Format", "internal-pdf-viewer"},
+    {"Microsoft Edge PDF Viewer", "Portable Document Format", "internal-pdf-viewer"},
+    {"WebKit built-in PDF", "Portable Document Format", "internal-pdf-viewer"}
+};
+
+DOMPlugin* MakeFakePlugin(const PluginDefinition& def, LocalDOMWindow* window) {
+  String plugin_name = String(def.name);
+  String description = String(def.description);
+  String filename = String(def.filename);
+  
   auto* plugin_info =
       MakeGarbageCollected<PluginInfo>(plugin_name, filename, description,
                                        /*background_color=*/Color::kTransparent,
@@ -54,14 +75,25 @@ DOMPlugin* MakeFakePlugin(String plugin_name, LocalDOMWindow* window) {
 
 DOMPluginArray::DOMPluginArray(LocalDOMWindow* window) : window_(window) {
   if (IsPdfViewerAvailable()) {
-    // See crbug.com/1164635 and https://github.com/whatwg/html/pull/6738.
-    // To reduce fingerprinting and make plugins/mimetypes more
-    // interoperable, this is the spec'd, hard-coded list of plugins:
-    Vector<String> plugins{"PDF Viewer", "Chrome PDF Viewer",
-                           "Chromium PDF Viewer", "Microsoft Edge PDF Viewer",
-                           "WebKit built-in PDF"};
-    for (auto name : plugins) {
-      dom_plugins_.push_back(MakeFakePlugin(name, window));
+    // ========== ANTI-DETECTION: Plugin Count Override ==========
+    // Use --plugins-count=N to control how many plugins are reported (0-5)
+    // This allows fingerprint variation between different browser profiles
+    // 
+    // Examples:
+    //   --plugins-count=0  → navigator.plugins.length = 0
+    //   --plugins-count=3  → navigator.plugins.length = 3 (first 3 plugins)
+    //   --plugins-count=5  → navigator.plugins.length = 5 (all plugins, default)
+    //
+    // JavaScript test:
+    //   console.log(navigator.plugins.length);     // → count
+    //   console.log(navigator.plugins[0].name);    // → "PDF Viewer"
+    //   console.log(navigator.plugins[0].filename); // → "internal-pdf-viewer"
+    
+    int plugins_count = WebGLDebugRendererInfo::GetPluginsCountOverride();
+    
+    // Create plugin objects up to the specified count
+    for (int i = 0; i < plugins_count && i < 5; i++) {
+      dom_plugins_.push_back(MakeFakePlugin(kStandardPlugins[i], window));
     }
   }
 }

@@ -201,10 +201,10 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
   int major_version_number;
   bool parse_result = base::StringToInt(major_version, &major_version_number);
   DCHECK(parse_result);
-  std::optional<std::string> brand;
-#if !BUILDFLAG(CHROMIUM_BRANDING)
-  brand = version_info::GetProductName();
-#endif
+  
+  // GRA BROWSER: Always use "Google Chrome" brand for anti-detect fingerprinting
+  // instead of relying on CHROMIUM_BRANDING
+  std::optional<std::string> brand = "Google Chrome";
 
   std::string brand_version =
       output_version_type == blink::UserAgentBrandVersionType::kFullVersion
@@ -220,10 +220,14 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
 // `version` value.
 // TODO(crbug.com/1291612): Consolidate *MajorVersionList() methods by using
 // GetVersionNumber()
+// GRA BROWSER: Hardcode to Chrome 124 for anti-detect fingerprinting
 const blink::UserAgentBrandList GetUserAgentBrandMajorVersionListInternal(
     std::optional<blink::UserAgentBrandVersion> additional_brand_version) {
-  return GetUserAgentBrandList(version_info::GetMajorVersionNumber(),
-                               std::string(version_info::GetVersionNumber()),
+  // Hardcoded Chrome 124 version for Gra Browser anti-detect
+  constexpr char kGraFakeMajorVersion[] = "124";
+  constexpr char kGraFakeFullVersion[] = "124.0.6367.60";
+  return GetUserAgentBrandList(kGraFakeMajorVersion,
+                               kGraFakeFullVersion,
                                blink::UserAgentBrandVersionType::kMajorVersion,
                                additional_brand_version);
 }
@@ -232,10 +236,14 @@ const blink::UserAgentBrandList GetUserAgentBrandMajorVersionListInternal(
 // `version` value.
 // TODO(crbug.com/1291612): Consolidate *FullVersionList() methods by using
 // GetVersionNumber()
+// GRA BROWSER: Hardcode to Chrome 124 for anti-detect fingerprinting
 const blink::UserAgentBrandList GetUserAgentBrandFullVersionListInternal(
     std::optional<blink::UserAgentBrandVersion> additional_brand_version) {
-  return GetUserAgentBrandList(version_info::GetMajorVersionNumber(),
-                               std::string(version_info::GetVersionNumber()),
+  // Hardcoded Chrome 124 version for Gra Browser anti-detect
+  constexpr char kGraFakeMajorVersion[] = "124";
+  constexpr char kGraFakeFullVersion[] = "124.0.6367.60";
+  return GetUserAgentBrandList(kGraFakeMajorVersion,
+                               kGraFakeFullVersion,
                                blink::UserAgentBrandVersionType::kFullVersion,
                                additional_brand_version);
 }
@@ -472,13 +480,13 @@ std::string BuildOSCpuInfo(
 
 }  // namespace
 
+// GRA BROWSER: Hardcode to Chrome 124 for anti-detect fingerprinting
 std::string GetProductAndVersion(
     UserAgentReductionEnterprisePolicyState user_agent_reduction) {
-  return ShouldReduceUserAgentMinorVersion(user_agent_reduction)
-             ? version_info::GetProductNameAndVersionForReducedUserAgent(
-                   blink::features::kUserAgentFrozenBuildVersion.Get())
-             : std::string(
-                   version_info::GetProductNameAndVersionForUserAgent());
+  // Hardcoded Chrome 124 product string for Gra Browser anti-detect
+  // Format: "Chrome/124.0.6367.60" instead of real version
+  constexpr char kGraFakeProductVersion[] = "Chrome/124.0.6367.60";
+  return kGraFakeProductVersion;
 }
 
 std::optional<std::string> GetUserAgentFromCommandLine() {
@@ -669,6 +677,9 @@ std::string GetPlatformForUAMetadata() {
 blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
   blink::UserAgentMetadata metadata;
 
+  // GRA BROWSER: Hardcode to Chrome 124 for anti-detect fingerprinting
+  constexpr char kGraFakeFullVersion[] = "124.0.6367.60";
+
   // Low entropy client hints.
   metadata.brand_version_list =
       GetUserAgentBrandMajorVersionListInternal(std::nullopt);
@@ -693,9 +704,10 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
   }
 
   // High entropy client hints.
+  // GRA BROWSER: Use hardcoded Chrome 124 version
   metadata.brand_full_version_list =
       GetUserAgentBrandFullVersionListInternal(std::nullopt);
-  metadata.full_version = std::string(version_info::GetVersionNumber());
+  metadata.full_version = kGraFakeFullVersion;  // Hardcoded instead of version_info::GetVersionNumber()
   metadata.architecture = GetCpuArchitecture();
   metadata.model = BuildModelInfo();
   metadata.form_factors = GetFormFactorsClientHint(metadata, metadata.mobile);

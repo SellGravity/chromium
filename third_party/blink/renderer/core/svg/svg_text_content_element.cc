@@ -20,6 +20,7 @@
 
 #include "third_party/blink/renderer/core/svg/svg_text_content_element.h"
 
+#include "base/command_line.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_dom_point_init.h"
 #include "third_party/blink/renderer/core/css/css_property_names.h"
 #include "third_party/blink/renderer/core/css_value_keywords.h"
@@ -38,6 +39,7 @@
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 
 namespace blink {
 
@@ -46,6 +48,32 @@ namespace {
 bool IsNGTextOrInline(const LayoutObject* object) {
   return object &&
          (object->IsSVGText() || object->IsInLayoutNGInlineFormattingContext());
+}
+
+// Micro-noise for SVG text metrics (getComputedTextLength, getSubStringLength)
+// Same design as Canvas TextMetrics: invisible to eye, changes fingerprint hash
+float ApplySvgTextMicroNoise(float value) {
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (!command_line || !command_line->HasSwitch("fonts-noise")) {
+    return value;
+  }
+
+  // Get seed from session cache (persisted per-profile)
+  uint64_t seed = SessionNoiseCache::GetInstance().GetFontsNoiseSeed();
+  if (seed == 0) {
+    seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+  }
+
+  // Deterministic hash from seed + value
+  uint32_t value_bits = *reinterpret_cast<const uint32_t*>(&value);
+  uint64_t hash = seed ^ (static_cast<uint64_t>(value_bits) * 0x9e3779b97f4a7c15ULL);
+
+  // Micro-noise: ±0.0001px (completely invisible)
+  constexpr float kMicroNoiseAmplitude = 0.0001f;
+  float normalized = (static_cast<float>(hash & 0xFFFFFFFF) / 0x7FFFFFFF) - 1.0f;
+  float noise = normalized * kMicroNoiseAmplitude;
+
+  return value + noise;
 }
 
 }  // namespace
@@ -114,7 +142,9 @@ float SVGTextContentElement::getComputedTextLength() {
   auto* layout_object = GetLayoutObject();
   if (IsNGTextOrInline(layout_object)) {
     SvgTextQuery query(*layout_object);
-    return query.SubStringLength(0, query.NumberOfCharacters());
+    float length = query.SubStringLength(0, query.NumberOfCharacters());
+    // Apply micro-noise for fingerprinting protection
+    return ApplySvgTextMicroNoise(length);
   }
   return 0;
 }
@@ -139,8 +169,11 @@ float SVGTextContentElement::getSubStringLength(
     nchars = number_of_chars - charnum;
 
   auto* layout_object = GetLayoutObject();
-  if (IsNGTextOrInline(layout_object))
-    return SvgTextQuery(*layout_object).SubStringLength(charnum, nchars);
+  if (IsNGTextOrInline(layout_object)) {
+    float length = SvgTextQuery(*layout_object).SubStringLength(charnum, nchars);
+    // Apply micro-noise for fingerprinting protection
+    return ApplySvgTextMicroNoise(length);
+  }
   return 0;
 }
 

@@ -64,6 +64,10 @@ class WebGLDebugRendererInfo final : public WebGLExtension {
   static std::string GetCanvasNoiseOverride();
   static std::string GetCanvasSeedOverride();
 
+  // ==================== Plugin Spoofing ====================
+  // Static method to get custom plugins count (0-5, default 5)
+  static int GetPluginsCountOverride();  // --plugins-count=N flag
+
   // ==================== Fingerprinting Protection Flags ====================
   // Static methods to check if specific fingerprinting protections are enabled
   static bool GetRectsNoiseFlag();   // --rects-noise flag

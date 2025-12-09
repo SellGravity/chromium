@@ -37,6 +37,8 @@ source_set("content") {
     "policy_blocklist_navigation_throttle.h",
     "policy_blocklist_service.cc",
     "policy_blocklist_service.h",
+    "spa_url_blocklist_tab_helper.cc",
+    "spa_url_blocklist_tab_helper.h",
   ]
   if (is_win || is_mac || is_linux || is_chromeos) {
     sources += [
@@ -46,11 +48,16 @@ source_set("content") {
   }
   deps = [
     ":safe_sites_navigation_throttle",
+    "//base",
     "//components/keyed_service/content",
     "//components/policy/core/browser",
     "//components/prefs",
     "//components/user_prefs",
     "//content/public/browser",
+    "//net",
+    "//services/network/public/cpp",
+    "//ui/base",
+    "//url",
   ]
 }
 

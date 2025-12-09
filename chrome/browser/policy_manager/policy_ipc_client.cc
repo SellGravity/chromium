@@ -46,14 +46,15 @@ bool PolicyIPCClient::Initialize(const std::string& server_url) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   server_url_ = server_url;
-  connected_ = true;
-
-  // Test connection with health check
+  connected_ = false;  // Start disconnected, try to connect
+  
+  // ========== NON-BLOCKING INIT ==========
+  // Try quick health check but don't block browser startup
   std::string response_json;
   if (!SendHttpPost("/api/health", "{}", &response_json)) {
-    LOG(WARNING) << "[PolicyIPCClient] Failed to connect to HTTP server: " << server_url;
-    connected_ = false;
-    return false;
+    DVLOG(1) << "[PolicyIPCClient] Health check failed (server may be offline)";
+    // Return true to allow browser startup - will retry on first URL check
+    return true;
   }
 
   // Parse health check response
@@ -61,16 +62,16 @@ bool PolicyIPCClient::Initialize(const std::string& server_url) {
   if (parsed && parsed->is_dict()) {
     const auto* status = parsed->GetDict().FindString("status");
     if (status && *status == "healthy") {
+      connected_ = true;
       last_successful_contact_ = base::TimeTicks::Now();
       consecutive_failures_ = 0;
-      LOG(INFO) << "[PolicyIPCClient] Connected to HTTP policy server: " << server_url;
+      DVLOG(1) << "[PolicyIPCClient] Connected to HTTP policy server: " << server_url;
       return true;
     }
   }
 
-  LOG(WARNING) << "[PolicyIPCClient] HTTP server health check failed";
-  connected_ = false;
-  return false;
+  DVLOG(1) << "[PolicyIPCClient] Health check response invalid";
+  return true;  // Allow browser startup
 }
 
 bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
@@ -94,7 +95,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
   urlComp.dwExtraInfoLength = (DWORD)-1;
 
   if (!WinHttpCrackUrl(wide_url.c_str(), (DWORD)wide_url.length(), 0, &urlComp)) {
-    LOG(ERROR) << "[PolicyIPCClient] Failed to parse URL: " << GetLastError();
+    DVLOG(1) << "[PolicyIPCClient] Failed to parse URL: " << GetLastError();
     return false;
   }
 
@@ -112,14 +113,18 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
       0);
 
   if (!hSession) {
-    LOG(ERROR) << "[PolicyIPCClient] WinHttpOpen failed: " << GetLastError();
+    DVLOG(1) << "[PolicyIPCClient] WinHttpOpen failed: " << GetLastError();
     return false;
   }
 
-  // Set timeout to 5 seconds
-  DWORD timeout = 5000;
-  WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-  WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+  // Set timeout to 200ms for fast response (prevent UI lag)
+  // If server doesn't respond in 200ms, we'll use cached result or allow
+  DWORD connect_timeout = 200;   // 200ms connect timeout (fast fail)
+  DWORD receive_timeout = 300;   // 300ms receive timeout
+  DWORD send_timeout = 200;      // 200ms send timeout
+  WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &connect_timeout, sizeof(connect_timeout));
+  WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &send_timeout, sizeof(send_timeout));
+  WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &receive_timeout, sizeof(receive_timeout));
 
   // Connect to server
   HINTERNET hConnect = WinHttpConnect(
@@ -129,7 +134,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
       0);
 
   if (!hConnect) {
-    LOG(ERROR) << "[PolicyIPCClient] WinHttpConnect failed: " << GetLastError();
+    DVLOG(1) << "[PolicyIPCClient] WinHttpConnect failed: " << GetLastError();
     WinHttpCloseHandle(hSession);
     return false;
   }
@@ -145,7 +150,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
       (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
 
   if (!hRequest) {
-    LOG(ERROR) << "[PolicyIPCClient] WinHttpOpenRequest failed: " << GetLastError();
+    DVLOG(1) << "[PolicyIPCClient] WinHttpOpenRequest failed: " << GetLastError();
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     return false;
@@ -170,7 +175,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
       0);
 
   if (!bResults) {
-    LOG(ERROR) << "[PolicyIPCClient] WinHttpSendRequest failed: " << GetLastError();
+    DVLOG(1) << "[PolicyIPCClient] WinHttpSendRequest failed: " << GetLastError();
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
@@ -181,7 +186,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
   bResults = WinHttpReceiveResponse(hRequest, NULL);
 
   if (!bResults) {
-    LOG(ERROR) << "[PolicyIPCClient] WinHttpReceiveResponse failed: " << GetLastError();
+    DVLOG(1) << "[PolicyIPCClient] WinHttpReceiveResponse failed: " << GetLastError();
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
@@ -200,7 +205,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
       WINHTTP_NO_HEADER_INDEX);
 
   if (statusCode != 200) {
-    LOG(ERROR) << "[PolicyIPCClient] HTTP error: " << statusCode;
+    DVLOG(1) << "[PolicyIPCClient] HTTP error: " << statusCode;
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
@@ -217,14 +222,14 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
     // Check for available data
     dwSize = 0;
     if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
-      LOG(ERROR) << "[PolicyIPCClient] WinHttpQueryDataAvailable failed: " << GetLastError();
+      DVLOG(1) << "[PolicyIPCClient] WinHttpQueryDataAvailable failed: " << GetLastError();
       break;
     }
 
     // Allocate space for the buffer
     pszOutBuffer = new char[dwSize + 1];
     if (!pszOutBuffer) {
-      LOG(ERROR) << "[PolicyIPCClient] Out of memory";
+      DVLOG(1) << "[PolicyIPCClient] Out of memory";
       dwSize = 0;
       break;
     } else {
@@ -232,7 +237,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
       ZeroMemory(pszOutBuffer, dwSize + 1);
 
       if (!WinHttpReadData(hRequest, (LPVOID)pszOutBuffer, dwSize, &dwDownloaded)) {
-        LOG(ERROR) << "[PolicyIPCClient] WinHttpReadData failed: " << GetLastError();
+        DVLOG(1) << "[PolicyIPCClient] WinHttpReadData failed: " << GetLastError();
         delete[] pszOutBuffer;
         break;
       } else {
@@ -248,7 +253,7 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
   WinHttpCloseHandle(hSession);
 
   if (response_data.empty()) {
-    LOG(ERROR) << "[PolicyIPCClient] Empty HTTP response";
+    DVLOG(1) << "[PolicyIPCClient] Empty HTTP response";
     return false;
   }
 
@@ -261,31 +266,66 @@ bool PolicyIPCClient::SendHttpPost(const std::string& endpoint,
   return true;
 }
 
+bool PolicyIPCClient::GetCachedDecision(const std::string& cache_key, 
+                                        PolicyDecision* decision) {
+  auto it = url_cache_.find(cache_key);
+  if (it == url_cache_.end()) {
+    return false;  // Not in cache
+  }
+  
+  // Check if cache entry is still valid
+  if (base::TimeTicks::Now() - it->second.timestamp > cache_ttl_) {
+    url_cache_.erase(it);  // Remove expired entry
+    return false;
+  }
+  
+  *decision = it->second.decision;
+  return true;
+}
+
+void PolicyIPCClient::CacheDecision(const std::string& cache_key, 
+                                    const PolicyDecision& decision) {
+  // Limit cache size to prevent memory bloat
+  if (url_cache_.size() > 1000) {
+    // Clear old entries (simple approach: clear all)
+    url_cache_.clear();
+  }
+  
+  url_cache_[cache_key] = {decision, base::TimeTicks::Now()};
+}
+
 PolicyDecision PolicyIPCClient::CheckURLSync(const std::string& url) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   PolicyDecision decision;
   decision.allow = true;  // Default allow
 
+  // ========== CHECK CACHE FIRST (fast path) ==========
+  std::string cache_key = url + "|" + profile_name_;
+  if (GetCachedDecision(cache_key, &decision)) {
+    // Cache hit - return immediately without server call
+    return decision;
+  }
+
   // ========== FAIL-CLOSED SECURITY CHECK ==========
   if (IsInLockdownMode()) {
     // ========== AUTO-RECONNECT IN LOCKDOWN MODE ==========
     if (auto_reconnect_enabled_) {
-      LOG(WARNING) << "[PolicyIPCClient] LOCKDOWN MODE: Attempting auto-reconnect...";
+      DVLOG(1) << "[PolicyIPCClient] LOCKDOWN MODE: Attempting auto-reconnect...";
       if (TryReconnect()) {
-        LOG(INFO) << "[PolicyIPCClient] ✓ Reconnected from LOCKDOWN! Continuing...";
+        DVLOG(1) << "[PolicyIPCClient] Reconnected from LOCKDOWN";
         // Don't return, continue to execute the request below
       } else {
-        LOG(ERROR) << "[PolicyIPCClient] ✗ Reconnect failed, staying in LOCKDOWN";
+        DVLOG(1) << "[PolicyIPCClient] Reconnect failed, staying in LOCKDOWN";
         decision.allow = false;
         decision.reason = "LOCKDOWN: Policy server unavailable (fail-closed security)";
-        LOG(ERROR) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url;
+        DVLOG(1) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url;
         return decision;
       }
     } else {
       decision.allow = false;
       decision.reason = "LOCKDOWN: Policy server unavailable (fail-closed security)";
-      LOG(ERROR) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url;
+      DVLOG(1) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url;
       return decision;
     }
   }
@@ -293,21 +333,21 @@ PolicyDecision PolicyIPCClient::CheckURLSync(const std::string& url) {
   if (!connected_) {
     // ========== AUTO-RECONNECT ==========
     if (auto_reconnect_enabled_) {
-      LOG(WARNING) << "[PolicyIPCClient] Disconnected, attempting auto-reconnect...";
+      DVLOG(1) << "[PolicyIPCClient] Disconnected, attempting auto-reconnect...";
       if (TryReconnect()) {
-        LOG(INFO) << "[PolicyIPCClient] ✓ Reconnected! Continuing with request...";
+        DVLOG(1) << "[PolicyIPCClient] Reconnected! Continuing with request...";
         // Don't return, continue to execute the request below
       } else {
-        LOG(WARNING) << "[PolicyIPCClient] ✗ Reconnect failed";
+        DVLOG(1) << "[PolicyIPCClient] Reconnect failed";
         if (!fail_closed_mode_) {
-          LOG(WARNING) << "[PolicyIPCClient] Server not connected but fail-open mode";
+          DVLOG(1) << "[PolicyIPCClient] Server not connected but fail-open mode";
         }
         return decision;
       }
     } else {
       // Auto-reconnect disabled, return immediately
       if (!fail_closed_mode_) {
-        LOG(WARNING) << "[PolicyIPCClient] Server not connected but fail-open mode";
+        DVLOG(1) << "[PolicyIPCClient] Server not connected but fail-open mode";
       }
       return decision;
     }
@@ -326,17 +366,17 @@ PolicyDecision PolicyIPCClient::CheckURLSync(const std::string& url) {
   // Send HTTP POST to /api/check_url
   std::string response_json;
   if (!SendHttpPost("/api/check_url", request_json, &response_json)) {
-    LOG(WARNING) << "[PolicyIPCClient] Failed to check URL via HTTP: " << url;
+    DVLOG(1) << "[PolicyIPCClient] Failed to check URL via HTTP: " << url;
 
     consecutive_failures_++;
 
     // ========== AUTO-RECONNECT ON FAILURE ==========
     if (auto_reconnect_enabled_ && consecutive_failures_ >= 2) {
-      LOG(WARNING) << "[PolicyIPCClient] Multiple failures detected, attempting auto-reconnect...";
+      DVLOG(1) << "[PolicyIPCClient] Multiple failures detected, attempting auto-reconnect...";
       if (TryReconnect()) {
         // Retry the request after successful reconnect
         if (SendHttpPost("/api/check_url", request_json, &response_json)) {
-          LOG(INFO) << "[PolicyIPCClient] ✓ Request succeeded after reconnect";
+          DVLOG(1) << "[PolicyIPCClient] Request succeeded after reconnect";
           goto parse_response;  // Jump to response parsing
         }
       }
@@ -345,7 +385,7 @@ PolicyDecision PolicyIPCClient::CheckURLSync(const std::string& url) {
     if (fail_closed_mode_ && consecutive_failures_ >= kMaxFailuresBeforeLockdown) {
       decision.allow = false;
       decision.reason = "Server connection failed (fail-closed security)";
-      LOG(ERROR) << "[PolicyIPCClient] BLOCKING due to connection failures: " << url;
+      DVLOG(1) << "[PolicyIPCClient] BLOCKING due to connection failures: " << url;
       return decision;
     }
 
@@ -368,6 +408,9 @@ parse_response:
     decision.reason = *reason;
   }
 
+  // ========== CACHE THE RESULT ==========
+  CacheDecision(cache_key, decision);
+
   return decision;
 }
 
@@ -378,25 +421,32 @@ PolicyDecision PolicyIPCClient::CheckURLSync(const std::string& url,
   PolicyDecision decision;
   decision.allow = true;
 
+  // ========== CHECK CACHE FIRST (fast path) ==========
+  std::string cache_key = url + "|" + profile_name;
+  if (GetCachedDecision(cache_key, &decision)) {
+    // Cache hit - return immediately without server call
+    return decision;
+  }
+
   if (IsInLockdownMode()) {
     // ========== AUTO-RECONNECT IN LOCKDOWN MODE ==========
     if (auto_reconnect_enabled_) {
-      LOG(WARNING) << "[PolicyIPCClient] LOCKDOWN MODE: Attempting auto-reconnect...";
+      DVLOG(1) << "[PolicyIPCClient] LOCKDOWN MODE: Attempting auto-reconnect...";
       if (TryReconnect()) {
-        LOG(INFO) << "[PolicyIPCClient] ✓ Reconnected from LOCKDOWN! Continuing...";
+        DVLOG(1) << "[PolicyIPCClient] Reconnected from LOCKDOWN";
         // Don't return, continue to execute the request below
       } else {
-        LOG(ERROR) << "[PolicyIPCClient] ✗ Reconnect failed, staying in LOCKDOWN";
+        DVLOG(1) << "[PolicyIPCClient] Reconnect failed, staying in LOCKDOWN";
         decision.allow = false;
         decision.reason = "LOCKDOWN: Policy server unavailable (fail-closed security)";
-        LOG(ERROR) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url
+        DVLOG(1) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url
                    << " | Profile: " << profile_name;
         return decision;
       }
     } else {
       decision.allow = false;
       decision.reason = "LOCKDOWN: Policy server unavailable (fail-closed security)";
-      LOG(ERROR) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url
+      DVLOG(1) << "[PolicyIPCClient] LOCKDOWN MODE: Blocking URL: " << url
                  << " | Profile: " << profile_name;
       return decision;
     }
@@ -405,12 +455,12 @@ PolicyDecision PolicyIPCClient::CheckURLSync(const std::string& url,
   if (!connected_) {
     // ========== AUTO-RECONNECT ==========
     if (auto_reconnect_enabled_) {
-      LOG(WARNING) << "[PolicyIPCClient] Disconnected, attempting auto-reconnect...";
+      DVLOG(1) << "[PolicyIPCClient] Disconnected, attempting auto-reconnect...";
       if (TryReconnect()) {
-        LOG(INFO) << "[PolicyIPCClient] ✓ Reconnected! Continuing with request...";
+        DVLOG(1) << "[PolicyIPCClient] Reconnected!";
         // Don't return, continue to execute the request below
       } else {
-        LOG(WARNING) << "[PolicyIPCClient] ✗ Reconnect failed";
+        DVLOG(1) << "[PolicyIPCClient] Reconnect failed";
         return decision;
       }
     } else {
@@ -427,17 +477,17 @@ PolicyDecision PolicyIPCClient::CheckURLSync(const std::string& url,
 
   std::string response_json;
   if (!SendHttpPost("/api/check_url", request_json, &response_json)) {
-    LOG(WARNING) << "[PolicyIPCClient] Failed to check URL via HTTP";
+    DVLOG(1) << "[PolicyIPCClient] Failed to check URL via HTTP";
 
     consecutive_failures_++;
 
     // ========== AUTO-RECONNECT ON FAILURE ==========
     if (auto_reconnect_enabled_ && consecutive_failures_ >= 2) {
-      LOG(WARNING) << "[PolicyIPCClient] Multiple failures detected, attempting auto-reconnect...";
+      DVLOG(1) << "[PolicyIPCClient] Multiple failures detected, attempting auto-reconnect...";
       if (TryReconnect()) {
         // Retry the request after successful reconnect
         if (SendHttpPost("/api/check_url", request_json, &response_json)) {
-          LOG(INFO) << "[PolicyIPCClient] ✓ Request succeeded after reconnect";
+          DVLOG(1) << "[PolicyIPCClient] Request succeeded after reconnect";
           goto parse_response_profile;  // Jump to response parsing
         }
       }
@@ -467,6 +517,9 @@ parse_response_profile:
     decision.reason = *reason;
   }
 
+  // ========== CACHE THE RESULT ==========
+  CacheDecision(cache_key, decision);
+
   return decision;
 }
 
@@ -489,7 +542,7 @@ base::Value::Dict PolicyIPCClient::GetPolicyDictSync(const std::string& role) {
   // Send HTTP GET (using POST with empty body for simplicity)
   std::string response_json;
   if (!SendHttpPost(endpoint, "{}", &response_json)) {
-    LOG(WARNING) << "[PolicyIPCClient] Failed to get policy for role: " << role;
+    DVLOG(1) << "[PolicyIPCClient] Failed to get policy for role: " << role;
     return result;
   }
 
@@ -566,19 +619,19 @@ bool PolicyIPCClient::TryReconnect() {
 
   if (!last_reconnect_attempt_.is_null() &&
       time_since_last_attempt < reconnect_delay_) {
-    LOG(WARNING) << "[PolicyIPCClient] Throttling reconnect attempt (last: "
+    DVLOG(1) << "[PolicyIPCClient] Throttling reconnect attempt (last: "
                  << time_since_last_attempt.InSeconds() << "s ago)";
     return false;
   }
 
   last_reconnect_attempt_ = base::TimeTicks::Now();
 
-  LOG(INFO) << "[PolicyIPCClient] → Attempting to reconnect to: " << server_url_;
+  DVLOG(1) << "[PolicyIPCClient] Attempting to reconnect to: " << server_url_;
 
   // Try to reconnect by sending health check
   std::string response_json;
   if (!SendHttpPost("/api/health", "{}", &response_json)) {
-    LOG(WARNING) << "[PolicyIPCClient] ✗ Reconnect failed - server not responding";
+    DVLOG(1) << "[PolicyIPCClient] Reconnect failed - server not responding";
     connected_ = false;
     return false;
   }
@@ -591,19 +644,19 @@ bool PolicyIPCClient::TryReconnect() {
       connected_ = true;
       last_successful_contact_ = base::TimeTicks::Now();
       consecutive_failures_ = 0;
-      LOG(INFO) << "[PolicyIPCClient] ✓ Reconnected successfully to: " << server_url_;
+      DVLOG(1) << "[PolicyIPCClient] Reconnected successfully to: " << server_url_;
       return true;
     }
   }
 
-  LOG(WARNING) << "[PolicyIPCClient] ✗ Reconnect failed - invalid health check response";
+  DVLOG(1) << "[PolicyIPCClient] Reconnect failed - invalid health check response";
   connected_ = false;
   return false;
 }
 
 void PolicyIPCClient::SetAutoReconnect(bool enabled) {
   auto_reconnect_enabled_ = enabled;
-  LOG(INFO) << "[PolicyIPCClient] Auto-reconnect "
+  DVLOG(1) << "[PolicyIPCClient] Auto-reconnect "
             << (enabled ? "ENABLED" : "DISABLED");
 }
 
