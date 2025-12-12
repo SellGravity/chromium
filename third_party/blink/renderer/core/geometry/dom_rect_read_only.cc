@@ -15,22 +15,32 @@ namespace blink {
 
 namespace {
 
-// Micro-noise for ClientRects fingerprinting protection.
+// ==========================================================================
+// RECTS NOISE - DISABLED BY DEFAULT
+// ==========================================================================
+// 
+// WARNING: Applying noise to DOMRect values causes CreepJS to detect
+// "failed math calculation" errors because:
+// 1. Layout geometry calculations become inconsistent
+// 2. CSS rules like width + padding don't add up correctly
+// 3. Element dimensions don't match their parent containers
 //
-// DESIGN: Same as Font/Canvas micro-noise
-// - Visual: Human eye sees NO difference (elements don't shift)
-// - Detection: JS getBoundingClientRect() returns slightly different values
+// This feature is DISABLED even when --rects-noise flag is set.
+// Fingerprint via rects is less important than Canvas/WebGL, and
+// the detection risk is too high.
 //
-// The noise amplitude is 0.0001px, which is:
-// - Completely invisible (10,000 elements needed to shift 1px total)
-// - But changes JS comparison: (rect1.x === rect2.x) → false
-//
-// NOTE: We apply noise in constructor, so values are cached per DOMRect instance.
-// This prevents jitter when reading same rect multiple times.
+// If you need this feature, set both --rects-noise AND --rects-noise-force
+// ==========================================================================
+
 double ApplyRectsMicroNoise(double value) {
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (!command_line || !command_line->HasSwitch("rects-noise")) {
-    return value;
+  
+  // DISABLED: Only enable if BOTH flags are set
+  // This prevents accidental enabling via just --rects-noise
+  if (!command_line || 
+      !command_line->HasSwitch("rects-noise") ||
+      !command_line->HasSwitch("rects-noise-force")) {
+    return value;  // Return original value (no noise)
   }
 
   // Get seed from session cache (persisted per-profile)

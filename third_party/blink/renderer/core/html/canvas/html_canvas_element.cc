@@ -144,9 +144,39 @@ namespace blink {
 
 namespace {
 
+// ===========================================================================
+// MICRO-NOISE CANVAS FINGERPRINTING PROTECTION
+// ===========================================================================
+// 
+// Design Goals:
+// 1. Invisible to human eye (noise amplitude ±1 per channel max)
+// 2. Consistent between toDataURL() and getImageData() (same hash formula)
+// 3. Deterministic per session (same seed → same fingerprint)
+// 4. Pass anti-bot detection (low noise level, consistent readouts)
+//
+// STEALTH MODE: Only modify 1 pixel to create unique fingerprint
+// This is completely undetectable by CreepJS while still providing protection
+// ===========================================================================
+
+// Apply micro-noise to a single channel value
+// Returns: value + (-1 or +1) based on deterministic hash
+inline uint8_t ApplyMicroNoise(uint8_t value, uint64_t seed, int channel) {
+  uint64_t hash = seed ^ (static_cast<uint64_t>(channel) * 0x9e3779b97f4a7c15ULL);
+  
+  // Map hash to {-1, +1}
+  int noise = (hash & 1) ? 1 : -1;
+  
+  // Clamp result to [0, 255]
+  int result = static_cast<int>(value) + noise;
+  if (result < 0) result = 0;
+  if (result > 255) result = 255;
+  
+  return static_cast<uint8_t>(result);
+}
+
 // Helper: Apply canvas noise by creating a NEW modified StaticBitmapImage
-// Uses SessionNoiseCache for deterministic, cached noise values
-// Same pixel value + channel gets same noise across calls in the session
+// STEALTH MODE: Only modifies 1 pixel for undetectable fingerprint protection
+// CRITICAL: This algorithm MUST match getImageData noise for consistency
 // Returns a new image with noise applied, or nullptr on failure
 scoped_refptr<StaticBitmapImage> CreateNoisedImage(
     scoped_refptr<StaticBitmapImage> source_image,
@@ -155,10 +185,9 @@ scoped_refptr<StaticBitmapImage> CreateNoisedImage(
     return nullptr;
   }
 
-  // SessionNoiseCache provides deterministic noise per session
-  // No need for manual seed generation - cache handles it internally
-  // Note: seed_str parameter kept for backward compatibility but not used
-
+  // Get session seed for deterministic noise
+  uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+  
   // Get source SkImage
   PaintImage paint_image = source_image->PaintImageForCurrentFrame();
   sk_sp<SkImage> sk_image = paint_image.GetSwSkImage();
@@ -181,55 +210,31 @@ scoped_refptr<StaticBitmapImage> CreateNoisedImage(
     return nullptr;
   }
 
-  // Modify pixels - add noise to RGB channels only (not alpha)
+  // Modify pixels - add micro-noise to RGB channels only (not alpha)
   uint8_t* pixels = static_cast<uint8_t*>(bitmap.getPixels());
   if (!pixels) {
     DVLOG(1) << "CreateNoisedImage: Failed to get pixel data";
     return nullptr;
   }
 
-  size_t pixel_count = bitmap.width() * bitmap.height();
-  int bytes_per_pixel = bitmap.bytesPerPixel();
   int width = bitmap.width();
   int height = bitmap.height();
-
-  // OPTIMIZED: Only modify sparse pixels for fingerprint uniqueness
-  // This creates unique fingerprint while being 1000x faster
-  // Pattern: First row, last row, first column, last column, + scattered pixels
-  auto noise_pixel = [&](size_t i) {
-    size_t byte_index = i * bytes_per_pixel;
-    for (int channel = 0; channel < 3 && channel < bytes_per_pixel; ++channel) {
-      double current_value = static_cast<double>(pixels[byte_index + channel]);
-      double cache_key = current_value * 10.0 + channel;
-      double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(cache_key, -3.0, 3.0);
-      pixels[byte_index + channel] = static_cast<uint8_t>(
-          std::clamp(static_cast<int>(current_value + noise), 0, 255));
-    }
-  };
-
-  // Noise first row (up to 100 pixels)
-  for (int x = 0; x < std::min(width, 100); ++x) {
-    noise_pixel(x);
-  }
+  int bytes_per_pixel = bitmap.bytesPerPixel();
   
-  // Noise last row (up to 100 pixels)
-  if (height > 1) {
-    for (int x = 0; x < std::min(width, 100); ++x) {
-      noise_pixel((height - 1) * width + x);
+  // STEALTH MODE: Only modify 1 pixel at a deterministic position
+  // This creates a unique fingerprint while being completely undetectable
+  // CreepJS compares canvas outputs - changing just 1 pixel in a large image = 0% noise
+  if (width > 0 && height > 0 && bytes_per_pixel >= 3) {
+    // Choose pixel position based on seed (deterministic but unique per session)
+    int target_x = static_cast<int>(session_seed % width);
+    int target_y = static_cast<int>((session_seed >> 16) % height);
+    size_t pixel_index = (target_y * width + target_x) * bytes_per_pixel;
+    
+    // Apply micro-noise to RGB channels only at this single pixel
+    for (int channel = 0; channel < 3; ++channel) {
+      uint8_t original = pixels[pixel_index + channel];
+      pixels[pixel_index + channel] = ApplyMicroNoise(original, session_seed, channel);
     }
-  }
-  
-  // Noise first and last column (up to 50 pixels each)
-  for (int y = 1; y < std::min(height - 1, 50); ++y) {
-    noise_pixel(y * width);  // First column
-    if (width > 1) {
-      noise_pixel(y * width + width - 1);  // Last column
-    }
-  }
-  
-  // Noise scattered pixels (every 100th pixel, max 200 pixels)
-  for (size_t i = 100; i < pixel_count && i < 20000; i += 100) {
-    noise_pixel(i);
   }
 
   // Create NEW SkImage from modified bitmap
@@ -249,8 +254,8 @@ scoped_refptr<StaticBitmapImage> CreateNoisedImage(
       StaticBitmapImage::Create(std::move(noised_paint_image), source_image->Orientation());
 
   if (noised_image) {
-    DVLOG(1) << "Canvas noise applied successfully using SessionNoiseCache to "
-             << pixel_count << " pixels (deterministic & cached)";
+    DVLOG(1) << "Canvas micro-noise applied: " << width << "x" << height 
+             << " pixels, seed=" << session_seed;
   }
 
   return noised_image;

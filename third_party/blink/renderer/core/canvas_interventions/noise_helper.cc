@@ -20,7 +20,10 @@ namespace blink {
 namespace {
 
 constexpr uint8_t kMaxClosePixelDelta = 10u;
-constexpr uint8_t kMaxNoisePerChannel = 3u;
+// MODIFIED: Reduced from 3 to 1 for micro-noise fingerprint protection
+// ±1 noise is imperceptible but still creates unique fingerprint
+// This fixes CreepJS/Pixelscan detection of high noise levels
+constexpr uint8_t kMaxNoisePerChannel = 1u;
 constexpr uint8_t kChannelsPerPixel = 4u;
 constexpr std::array<uint8_t, 4u> kEmptyPixel({0, 0, 0, 0});
 

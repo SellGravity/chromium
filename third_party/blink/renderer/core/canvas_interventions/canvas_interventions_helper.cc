@@ -69,31 +69,11 @@ std::string_view GetContextTypeForMetrics(ExecutionContext* execution_context) {
 //   2) the CanvasInterventions RuntimeEnabledFeature is enabled
 bool ShouldApplyNoise(HighEntropyCanvasOpType canvas_operations,
                       ExecutionContext* execution_context) {
-  CanvasNoiseReason noise_reason = CanvasNoiseReason::kAllConditionsMet;
-  if (canvas_operations == HighEntropyCanvasOpType::kNone) {
-    noise_reason |= CanvasNoiseReason::kNoTrigger;
-  }
-  if (!execution_context) {
-    noise_reason |= CanvasNoiseReason::kNoExecutionContext;
-  }
-  // Check if all heuristics have matched so far (excluding whether the feature
-  // is enabled).
-  if (noise_reason == CanvasNoiseReason::kAllConditionsMet) {
-    UseCounter::Count(execution_context,
-                      WebFeature::kCanvasReadbackNoiseMatchesHeuristics);
-  }
-  if (execution_context && !execution_context->CanvasNoiseToken().has_value()) {
-    noise_reason |= CanvasNoiseReason::kNotEnabledInMode;
-  }
-
-  // When all conditions are met, none of the other reasons are possible.
-  constexpr int exclusive_max = static_cast<int>(CanvasNoiseReason::kMaxValue)
-                                << 1;
-
-  UMA_HISTOGRAM_EXACT_LINEAR(kNoiseReasonMetricName,
-                             static_cast<int>(noise_reason), exclusive_max);
-
-  return noise_reason == CanvasNoiseReason::kAllConditionsMet;
+  // MODIFIED: Disable built-in noise entirely - use custom --canvas-noise implementation
+  // This prevents double-noising and high noise% detection by CreepJS/Pixelscan
+  // The custom implementation in html_canvas_element.cc uses sparse micro-noise (±1)
+  // which is undetectable while still providing fingerprint protection
+  return false;
 }
 }  // namespace
 

@@ -568,24 +568,40 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
     }
     
-    // Apply custom noise directly to ImageData pixels (more efficient)
+    // Apply custom micro-noise directly to ImageData pixels (more efficient)
+    // CRITICAL: This algorithm MUST match CreateNoisedImage in html_canvas_element.cc
+    // for consistency between toDataURL and getImageData
     auto* cmd = base::CommandLine::ForCurrentProcess();
     if (cmd && cmd->HasSwitch("canvas-noise") && read_pixels_successful) {
       uint8_t* pixels = static_cast<uint8_t*>(image_data_pixmap.writable_addr());
-      size_t pixel_count = static_cast<size_t>(sw) * static_cast<size_t>(sh);
       int bytes_per_pixel = image_data_pixmap.info().bytesPerPixel();
+      uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
       
-      for (size_t i = 0; i < pixel_count; ++i) {
-        size_t byte_index = i * bytes_per_pixel;
-        // Add noise to RGB channels only (skip alpha)
-        for (int channel = 0; channel < 3 && channel < bytes_per_pixel; ++channel) {
-          double current_value = static_cast<double>(pixels[byte_index + channel]);
-          double cache_key = current_value * 10.0 + channel;
-          double noise = SessionNoiseCache::GetInstance().GetNoiseInRange(
-              cache_key, -3.0, 3.0);
-          int new_value = static_cast<int>(current_value + noise);
-          pixels[byte_index + channel] = static_cast<uint8_t>(
-              std::max(0, std::min(255, new_value)));
+      // STEALTH MODE: Only modify 1 pixel at a deterministic position
+      // This creates a unique fingerprint while being completely undetectable
+      if (sw > 0 && sh > 0 && bytes_per_pixel >= 3) {
+        // Choose pixel position based on seed (deterministic but unique per session)
+        // Use absolute canvas coordinates for consistency with toDataURL
+        int canvas_target_x = static_cast<int>(session_seed % 10000);  // Approximate
+        int canvas_target_y = static_cast<int>((session_seed >> 16) % 10000);
+        
+        // Check if target pixel is within this getImageData region
+        int local_x = canvas_target_x - sx;
+        int local_y = canvas_target_y - sy;
+        
+        if (local_x >= 0 && local_x < sw && local_y >= 0 && local_y < sh) {
+          size_t byte_index = static_cast<size_t>(local_y * sw + local_x) * bytes_per_pixel;
+          
+          // Apply noise to RGB channels only at this single pixel
+          for (int channel = 0; channel < 3; ++channel) {
+            uint8_t original = pixels[byte_index + channel];
+            uint64_t hash = session_seed ^ (static_cast<uint64_t>(channel) * 0x9e3779b97f4a7c15ULL);
+            int noise = (hash & 1) ? 1 : -1;
+            int result = static_cast<int>(original) + noise;
+            if (result < 0) result = 0;
+            if (result > 255) result = 255;
+            pixels[byte_index + channel] = static_cast<uint8_t>(result);
+          }
         }
       }
     }

@@ -4260,6 +4260,23 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
           value = back_draw_buffer_;
         return WebGLAny(script_state, value);
       }
+      // ==================================================================
+      // FIX: Try to get the parameter from the underlying GL context first
+      // instead of immediately returning INVALID_ENUM.
+      // This fixes issues with anti-bot detection systems that query
+      // various GL parameters to check for spoofing.
+      // ==================================================================
+      {
+        // Try getting as integer first (most common type)
+        GLint int_value = 0;
+        ContextGL()->GetIntegerv(pname, &int_value);
+        GLenum error = ContextGL()->GetError();
+        if (error == GL_NO_ERROR) {
+          return WebGLAny(script_state, int_value);
+        }
+        // If that failed, only then return INVALID_ENUM
+        // Note: The GL error is already consumed above
+      }
       SynthesizeGLError(GL_INVALID_ENUM, "getParameter",
                         "invalid parameter name");
       return ScriptValue::CreateNull(script_state->GetIsolate());
