@@ -100,6 +100,7 @@ source_set("browser_tests") {
     "privacy_budget_browsertest.cc",
     "privacy_budget_browsertest_util.cc",
     "privacy_budget_browsertest_util.h",
+    "session_noise_cache_browsertest.cc",
   ]
 
   defines = [ "HAS_OUT_OF_PROC_TEST_RUNNER" ]
