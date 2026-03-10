@@ -8,6 +8,7 @@
 #include <chrono>
 #include <random>
 
+#include "base/bit_cast.h"
 #include "base/command_line.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_number_conversions.h"
@@ -132,7 +133,7 @@ class UnicodeGlyphsNoiseGenerator {
 
   // Hash function for glyph metrics (combines glyph, value, and coordinate)
   uint64_t HashGlyphMetric(float value, Glyph glyph, int coord_index) const {
-    uint32_t v = *reinterpret_cast<const uint32_t*>(&value);
+    uint32_t v = base::bit_cast<uint32_t>(value);
     return session_seed_ ^ (static_cast<uint64_t>(glyph) * 0x9e3779b97f4a7c15ULL) ^
            (static_cast<uint64_t>(v) * 0x7f4a7c15) ^
            (static_cast<uint64_t>(coord_index) * 0x4a7c157f);

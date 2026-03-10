@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/core/geometry/dom_rect_read_only.h"
 
+#include "base/bit_cast.h"
 #include "base/command_line.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_dom_rect_init.h"
@@ -50,7 +51,7 @@ double ApplyRectsMicroNoise(double value) {
   }
 
   // Deterministic hash from seed + value
-  uint64_t value_bits = *reinterpret_cast<const uint64_t*>(&value);
+  uint64_t value_bits = base::bit_cast<uint64_t>(value);
   uint64_t hash = seed ^ (value_bits * 0x9e3779b97f4a7c15ULL);
 
   // Micro-noise: ±0.0001px (completely invisible)
@@ -59,11 +60,6 @@ double ApplyRectsMicroNoise(double value) {
   double noise = normalized * kMicroNoiseAmplitude;
 
   return value + noise;
-}
-
-// Legacy function name for compatibility
-double ApplyRectsNoise(double value) {
-  return ApplyRectsMicroNoise(value);
 }
 
 }  // namespace
@@ -108,10 +104,10 @@ DOMRectReadOnly::DOMRectReadOnly(double x,
                                  double y,
                                  double width,
                                  double height)
-    : x_(ApplyRectsNoise(x)),
-      y_(ApplyRectsNoise(y)),
-      width_(ApplyRectsNoise(width)),
-      height_(ApplyRectsNoise(height)) {}
+    : x_(ApplyRectsMicroNoise(x)),
+      y_(ApplyRectsMicroNoise(y)),
+      width_(ApplyRectsMicroNoise(width)),
+      height_(ApplyRectsMicroNoise(height)) {}
 
 gfx::PointF DOMRectReadOnly::Center() const {
   return gfx::PointF(left() + std::fabs(width_) / 2.0,

@@ -134,8 +134,6 @@
 #include "ui/gfx/geometry/skia_conversions.h"
 #include "v8/include/v8.h"
 #include "base/command_line.h"
-#include <ctime>
-#include <random>
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
@@ -145,120 +143,124 @@ namespace blink {
 namespace {
 
 // ===========================================================================
-// MICRO-NOISE CANVAS FINGERPRINTING PROTECTION
+// STEALTH CANVAS FINGERPRINTING PROTECTION
 // ===========================================================================
 // 
-// Design Goals:
-// 1. Invisible to human eye (noise amplitude ±1 per channel max)
-// 2. Consistent between toDataURL() and getImageData() (same hash formula)
-// 3. Deterministic per session (same seed → same fingerprint)
-// 4. Pass anti-bot detection (low noise level, consistent readouts)
+// Anti-detect browser implementation that passes Pixelscan/CreepJS tests.
 //
-// STEALTH MODE: Only modify 1 pixel to create unique fingerprint
-// This is completely undetectable by CreepJS while still providing protection
+// Key principles:
+// 1. Noise is applied CONSISTENTLY across all readback methods
+// 2. Same canvas content + same session = same fingerprint
+// 3. Noise is deterministic (hash-based, not random)
+// 4. Noise is minimal (single pixel modification)
+// 5. Different sessions = different fingerprints (anti-tracking)
+//
+// The noise is applied by modifying a SINGLE pixel based on:
+// - Canvas content hash (ensures same canvas = same modification)
+// - Session seed (ensures different sessions = different fingerprints)
 // ===========================================================================
 
-// Apply micro-noise to a single channel value
-// Returns: value + (-1 or +1) based on deterministic hash
-inline uint8_t ApplyMicroNoise(uint8_t value, uint64_t seed, int channel) {
-  uint64_t hash = seed ^ (static_cast<uint64_t>(channel) * 0x9e3779b97f4a7c15ULL);
-  
-  // Map hash to {-1, +1}
-  int noise = (hash & 1) ? 1 : -1;
-  
-  // Clamp result to [0, 255]
-  int result = static_cast<int>(value) + noise;
-  if (result < 0) result = 0;
-  if (result > 255) result = 255;
-  
-  return static_cast<uint8_t>(result);
+// FNV-1a hash for deterministic noise calculation
+inline uint32_t FnvHash(const uint8_t* data, size_t len, uint32_t seed) {
+  uint32_t hash = 2166136261u ^ seed;
+  for (size_t i = 0; i < len; i++) {
+    hash ^= data[i];
+    hash *= 16777619u;
+  }
+  return hash;
 }
 
-// Helper: Apply canvas noise by creating a NEW modified StaticBitmapImage
-// STEALTH MODE: Only modifies 1 pixel for undetectable fingerprint protection
-// CRITICAL: This algorithm MUST match getImageData noise for consistency
-// Returns a new image with noise applied, or nullptr on failure
-scoped_refptr<StaticBitmapImage> CreateNoisedImage(
+// Apply stealth noise to StaticBitmapImage
+// Returns a new image with deterministic single-pixel modification
+scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
     scoped_refptr<StaticBitmapImage> source_image,
-    const std::string& seed_str) {
+    uint64_t session_seed) {
   if (!source_image) {
     return nullptr;
   }
 
-  // Get session seed for deterministic noise
-  uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
-  
-  // Get source SkImage
   PaintImage paint_image = source_image->PaintImageForCurrentFrame();
   sk_sp<SkImage> sk_image = paint_image.GetSwSkImage();
   if (!sk_image) {
-    DVLOG(1) << "CreateNoisedImage: Failed to get SkImage";
-    return nullptr;
+    return source_image;  // Return original on failure
   }
 
-  // Create a NEW mutable SkBitmap
+  int width = sk_image->width();
+  int height = sk_image->height();
+  
+  // Skip very small canvases
+  if (width < 4 || height < 4) {
+    return source_image;
+  }
+
+  // Create mutable bitmap
   SkBitmap bitmap;
   SkImageInfo info = sk_image->imageInfo();
   if (!bitmap.tryAllocPixels(info)) {
-    DVLOG(1) << "CreateNoisedImage: Failed to allocate bitmap";
-    return nullptr;
+    return source_image;
   }
 
-  // Read pixels from source image to our mutable bitmap
   if (!sk_image->readPixels(bitmap.pixmap(), 0, 0)) {
-    DVLOG(1) << "CreateNoisedImage: Failed to read pixels";
-    return nullptr;
+    return source_image;
   }
 
-  // Modify pixels - add micro-noise to RGB channels only (not alpha)
   uint8_t* pixels = static_cast<uint8_t*>(bitmap.getPixels());
   if (!pixels) {
-    DVLOG(1) << "CreateNoisedImage: Failed to get pixel data";
-    return nullptr;
+    return source_image;
   }
 
-  int width = bitmap.width();
-  int height = bitmap.height();
   int bytes_per_pixel = bitmap.bytesPerPixel();
   
-  // STEALTH MODE: Only modify 1 pixel at a deterministic position
-  // This creates a unique fingerprint while being completely undetectable
-  // CreepJS compares canvas outputs - changing just 1 pixel in a large image = 0% noise
-  if (width > 0 && height > 0 && bytes_per_pixel >= 3) {
-    // Choose pixel position based on seed (deterministic but unique per session)
-    int target_x = static_cast<int>(session_seed % width);
-    int target_y = static_cast<int>((session_seed >> 16) % height);
-    size_t pixel_index = (target_y * width + target_x) * bytes_per_pixel;
-    
-    // Apply micro-noise to RGB channels only at this single pixel
-    for (int channel = 0; channel < 3; ++channel) {
-      uint8_t original = pixels[pixel_index + channel];
-      pixels[pixel_index + channel] = ApplyMicroNoise(original, session_seed, channel);
+  // CRITICAL: Use width * bytes_per_pixel for calculations (no padding)
+  // This ensures the same byte layout as ImageData which has no row padding
+  size_t total_logical_bytes = static_cast<size_t>(width) * height * bytes_per_pixel;
+  
+  // Calculate content hash from a sample of pixels (fast)
+  // Sample from logical layout (skip row padding) to match getImageData
+  uint32_t content_hash = static_cast<uint32_t>(session_seed & 0xFFFFFFFF);
+  size_t sample_step = std::max(size_t(1), total_logical_bytes / 100);
+  
+  // Hash pixels row by row to handle potential row padding in SkBitmap
+  size_t logical_offset = 0;
+  for (int y = 0; y < height && logical_offset < total_logical_bytes; y++) {
+    uint8_t* row_start = pixels + (y * bitmap.rowBytes());
+    for (int x = 0; x < width * bytes_per_pixel && logical_offset < total_logical_bytes; x++) {
+      if (logical_offset % sample_step == 0) {
+        content_hash = FnvHash(&row_start[x], 1, content_hash);
+      }
+      logical_offset++;
     }
   }
 
-  // Create NEW SkImage from modified bitmap
+  // Determine which pixel to modify based on content hash
+  // This ensures SAME canvas content = SAME pixel modified
+  uint32_t pixel_index = content_hash % (width * height);
+  int px = pixel_index % width;
+  int py = pixel_index / width;
+  
+  // Calculate actual offset in SkBitmap (includes potential row padding)
+  size_t actual_offset = (py * bitmap.rowBytes()) + (px * bytes_per_pixel);
+  
+  // Modify only the R channel by ±1 (invisible to human eye)
+  // Direction based on session seed for uniqueness
+  int delta = (session_seed & 1) ? 1 : -1;
+  int old_r = pixels[actual_offset];
+  int new_r = std::clamp(old_r + delta, 0, 255);
+  pixels[actual_offset] = static_cast<uint8_t>(new_r);
+
+  // Create new image from modified bitmap
   sk_sp<SkImage> noised_sk_image = SkImages::RasterFromBitmap(bitmap);
   if (!noised_sk_image) {
-    DVLOG(1) << "CreateNoisedImage: Failed to create SkImage from bitmap";
-    return nullptr;
+    return source_image;
   }
 
-  // Create NEW StaticBitmapImage from modified SkImage
   PaintImage noised_paint_image = PaintImageBuilder::WithDefault()
       .set_image(noised_sk_image, PaintImage::GetNextContentId())
       .set_id(PaintImage::GetNextId())
       .TakePaintImage();
 
-  scoped_refptr<StaticBitmapImage> noised_image =
-      StaticBitmapImage::Create(std::move(noised_paint_image), source_image->Orientation());
-
-  if (noised_image) {
-    DVLOG(1) << "Canvas micro-noise applied: " << width << "x" << height 
-             << " pixels, seed=" << session_seed;
-  }
-
-  return noised_image;
+  return StaticBitmapImage::Create(std::move(noised_paint_image), 
+                                    source_image->Orientation());
 }
 
 constexpr unsigned kMaxCanvasAnimationBacklog = 2;
@@ -1429,20 +1431,15 @@ String HTMLCanvasElement::ToDataURLInternal(
   if (image_bitmap) {
     bool noised = false;
     
-    // Check for custom canvas-noise flag FIRST (takes priority)
+    // Check for custom canvas-noise flag
     auto* cmd = base::CommandLine::ForCurrentProcess();
     bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
     
     if (use_custom_noise) {
-      // Use custom SessionNoiseCache-based noise (faster, deterministic)
-      std::string seed_str = "";
-      if (cmd->HasSwitch("canvas-seed")) {
-        seed_str = cmd->GetSwitchValueASCII("canvas-seed");
-      }
-
-      scoped_refptr<StaticBitmapImage> noised_image =
-          CreateNoisedImage(image_bitmap, seed_str);
-
+      // Apply stealth noise - consistent across all readback methods
+      uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+      scoped_refptr<StaticBitmapImage> noised_image = 
+          ApplyStealthNoise(image_bitmap, session_seed);
       if (noised_image) {
         image_bitmap = noised_image;
         noised = true;
@@ -1555,18 +1552,15 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
     auto intervention_type =
         CanvasInterventionsHelper::CanvasInterventionType::kNone;
     
-    // Check for custom canvas-noise flag FIRST (takes priority)
+    // Check for custom canvas-noise flag
     auto* cmd = base::CommandLine::ForCurrentProcess();
     bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
     
     if (use_custom_noise) {
-      // Use custom SessionNoiseCache-based noise (faster, deterministic)
-      std::string seed_str = "";
-      if (cmd->HasSwitch("canvas-seed")) {
-        seed_str = cmd->GetSwitchValueASCII("canvas-seed");
-      }
-      scoped_refptr<StaticBitmapImage> noised_image =
-          CreateNoisedImage(image_bitmap, seed_str);
+      // Apply stealth noise - consistent across all readback methods
+      uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+      scoped_refptr<StaticBitmapImage> noised_image = 
+          ApplyStealthNoise(image_bitmap, session_seed);
       if (noised_image) {
         image_bitmap = noised_image;
         intervention_type =

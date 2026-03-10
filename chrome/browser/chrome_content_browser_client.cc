@@ -39,6 +39,7 @@
 #include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/path_service.h"
+#include "base/rand_util.h"
 #include "base/stl_util.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
@@ -2745,10 +2746,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
         uint64_t canvas_seed = prefs->GetUint64(prefs::kCanvasNoiseSeed);
         if (canvas_seed == 0) {
           // Generate new seed and save to profile
-          std::random_device rd;
-          std::mt19937_64 gen(rd());
-          std::uniform_int_distribution<uint64_t> dis;
-          canvas_seed = dis(gen);
+          canvas_seed = base::RandUint64();
           prefs->SetUint64(prefs::kCanvasNoiseSeed, canvas_seed);
         }
         // Pass seed to renderer
@@ -2761,10 +2759,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
         uint64_t glyphs_seed = prefs->GetUint64(prefs::kUnicodeGlyphsNoiseSeed);
         if (glyphs_seed == 0) {
           // Generate new seed and save to profile
-          std::random_device rd;
-          std::mt19937_64 gen(rd());
-          std::uniform_int_distribution<uint64_t> dis;
-          glyphs_seed = dis(gen);
+          glyphs_seed = base::RandUint64();
           prefs->SetUint64(prefs::kUnicodeGlyphsNoiseSeed, glyphs_seed);
         }
         // Pass seed to renderer
@@ -2777,10 +2772,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
         uint64_t audio_seed = prefs->GetUint64(prefs::kAudioNoiseSeed);
         if (audio_seed == 0) {
           // Generate new seed and save to profile
-          std::random_device rd;
-          std::mt19937_64 gen(rd());
-          std::uniform_int_distribution<uint64_t> dis;
-          audio_seed = dis(gen);
+          audio_seed = base::RandUint64();
           prefs->SetUint64(prefs::kAudioNoiseSeed, audio_seed);
         }
         // Pass seed to renderer
@@ -2793,10 +2785,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
         uint64_t rects_seed = prefs->GetUint64(prefs::kRectsNoiseSeed);
         if (rects_seed == 0) {
           // Generate new seed and save to profile
-          std::random_device rd;
-          std::mt19937_64 gen(rd());
-          std::uniform_int_distribution<uint64_t> dis;
-          rects_seed = dis(gen);
+          rects_seed = base::RandUint64();
           prefs->SetUint64(prefs::kRectsNoiseSeed, rects_seed);
         }
         // Pass seed to renderer

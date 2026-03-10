@@ -135,6 +135,56 @@ bool IsContextProviderValid() {
          !context_provider_wrapper->ContextProvider().IsContextLost();
 }
 
+// ===========================================================================
+// STEALTH CANVAS FINGERPRINTING PROTECTION - getImageData
+// ===========================================================================
+// FNV-1a hash for deterministic noise calculation
+// MUST match the hash in html_canvas_element.cc for consistency!
+inline uint32_t FnvHashGetImageData(const uint8_t* data, size_t len, uint32_t seed) {
+  uint32_t hash = 2166136261u ^ seed;
+  for (size_t i = 0; i < len; i++) {
+    hash ^= data[i];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+// Apply stealth noise to ImageData pixels
+// Uses SAME algorithm as ApplyStealthNoise in html_canvas_element.cc
+void ApplyStealthNoiseToImageData(uint8_t* pixels, int width, int height, 
+                                   int bytes_per_pixel, uint64_t session_seed) {
+  if (!pixels || width < 4 || height < 4) {
+    return;
+  }
+
+  size_t total_bytes = static_cast<size_t>(width) * height * bytes_per_pixel;
+  
+  // Calculate content hash from a sample of pixels (fast)
+  // Sample every ~1% of bytes to avoid hashing entire image
+  uint32_t content_hash = static_cast<uint32_t>(session_seed & 0xFFFFFFFF);
+  size_t sample_step = std::max(size_t(1), total_bytes / 100);
+  for (size_t i = 0; i < total_bytes; i += sample_step) {
+    content_hash = FnvHashGetImageData(&pixels[i], 1, content_hash);
+  }
+
+  // Determine which pixel to modify based on content hash
+  // This ensures SAME canvas content = SAME pixel modified
+  uint32_t pixel_index = content_hash % (width * height);
+  int px = pixel_index % width;
+  int py = pixel_index / width;
+  
+  // Calculate offset (ImageData is always RGBA, 4 bytes per pixel)
+  size_t row_bytes = static_cast<size_t>(width) * bytes_per_pixel;
+  size_t offset = (py * row_bytes) + (px * bytes_per_pixel);
+  
+  // Modify only the R channel by ±1 (invisible to human eye)
+  // Direction based on session seed for uniqueness
+  int delta = (session_seed & 1) ? 1 : -1;
+  int old_r = pixels[offset];
+  int new_r = std::clamp(old_r + delta, 0, 255);
+  pixels[offset] = static_cast<uint8_t>(new_r);
+}
+
 }  // namespace
 
 constexpr char kDefaultFont[] = "10px sans-serif";
@@ -568,42 +618,17 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
     }
     
-    // Apply custom micro-noise directly to ImageData pixels (more efficient)
-    // CRITICAL: This algorithm MUST match CreateNoisedImage in html_canvas_element.cc
-    // for consistency between toDataURL and getImageData
+    // Apply stealth noise if canvas-noise flag is set
+    // Uses SAME algorithm as toDataURL/toBlob for consistency
     auto* cmd = base::CommandLine::ForCurrentProcess();
     if (cmd && cmd->HasSwitch("canvas-noise") && read_pixels_successful) {
-      uint8_t* pixels = static_cast<uint8_t*>(image_data_pixmap.writable_addr());
-      int bytes_per_pixel = image_data_pixmap.info().bytesPerPixel();
       uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+      uint8_t* pixels = static_cast<uint8_t*>(image_data_pixmap.writable_addr());
+      int width = static_cast<int>(image_data_pixmap.width());
+      int height = static_cast<int>(image_data_pixmap.height());
+      int bytes_per_pixel = static_cast<int>(image_data_pixmap.info().bytesPerPixel());
       
-      // STEALTH MODE: Only modify 1 pixel at a deterministic position
-      // This creates a unique fingerprint while being completely undetectable
-      if (sw > 0 && sh > 0 && bytes_per_pixel >= 3) {
-        // Choose pixel position based on seed (deterministic but unique per session)
-        // Use absolute canvas coordinates for consistency with toDataURL
-        int canvas_target_x = static_cast<int>(session_seed % 10000);  // Approximate
-        int canvas_target_y = static_cast<int>((session_seed >> 16) % 10000);
-        
-        // Check if target pixel is within this getImageData region
-        int local_x = canvas_target_x - sx;
-        int local_y = canvas_target_y - sy;
-        
-        if (local_x >= 0 && local_x < sw && local_y >= 0 && local_y < sh) {
-          size_t byte_index = static_cast<size_t>(local_y * sw + local_x) * bytes_per_pixel;
-          
-          // Apply noise to RGB channels only at this single pixel
-          for (int channel = 0; channel < 3; ++channel) {
-            uint8_t original = pixels[byte_index + channel];
-            uint64_t hash = session_seed ^ (static_cast<uint64_t>(channel) * 0x9e3779b97f4a7c15ULL);
-            int noise = (hash & 1) ? 1 : -1;
-            int result = static_cast<int>(original) + noise;
-            if (result < 0) result = 0;
-            if (result > 255) result = 255;
-            pixels[byte_index + channel] = static_cast<uint8_t>(result);
-          }
-        }
-      }
+      ApplyStealthNoiseToImageData(pixels, width, height, bytes_per_pixel, session_seed);
     }
   }
 

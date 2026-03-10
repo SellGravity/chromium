@@ -9,6 +9,7 @@
 #include <fstream>
 #include <random>
 
+#include "base/bit_cast.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -417,7 +418,7 @@ class SessionNoiseCache {
 
   // Hash function that combines session seed with value
   uint64_t HashValue(double value) const {
-    uint64_t v = *reinterpret_cast<const uint64_t*>(&value);
+    uint64_t v = base::bit_cast<uint64_t>(value);
     return session_seed_ ^ (v * 0x9e3779b97f4a7c15ULL);
   }
 
@@ -425,9 +426,9 @@ class SessionNoiseCache {
   uint64_t HashValueWithRange(double value,
                                double min_noise,
                                double max_noise) const {
-    uint64_t v = *reinterpret_cast<const uint64_t*>(&value);
-    uint64_t min_v = *reinterpret_cast<const uint64_t*>(&min_noise);
-    uint64_t max_v = *reinterpret_cast<const uint64_t*>(&max_noise);
+    uint64_t v = base::bit_cast<uint64_t>(value);
+    uint64_t min_v = base::bit_cast<uint64_t>(min_noise);
+    uint64_t max_v = base::bit_cast<uint64_t>(max_noise);
     return session_seed_ ^ (v * 0x9e3779b97f4a7c15ULL) ^
            (min_v * 0x7f4a7c15) ^ (max_v * 0x4a7c157f);
   }

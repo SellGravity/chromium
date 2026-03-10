@@ -1,6 +1,8 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_AUDIO_NOISE_GENERATOR_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_AUDIO_NOISE_GENERATOR_H_
 
+#include <cmath>
+
 #include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 
 namespace blink {
@@ -27,7 +29,7 @@ class AudioNoiseGenerator {
         static_cast<double>(value),
         static_cast<double>(min_val),
         static_cast<double>(max_val));
-    return static_cast<int>(noise);
+    return static_cast<int>(std::lround(noise));
   }
 
  private:
