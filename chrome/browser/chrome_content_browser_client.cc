@@ -144,6 +144,9 @@
 #include "chrome/browser/profiles/renderer_updater.h"
 #include "chrome/browser/profiles/renderer_updater_factory.h"
 #include "chrome/browser/renderer_host/chrome_navigation_ui_data.h"
+#include "chrome/browser/permission_sync/permission_cache_manager.h"
+#include "chrome/browser/permission_sync/permission_cache_manager_factory.h"
+#include "chrome/browser/permission_sync/permission_sync_url_loader_throttle.h"
 #include "chrome/browser/renderer_preferences_util.h"
 #include "chrome/browser/safe_browsing/url_checker_delegate_impl.h"
 #include "chrome/browser/search/search.h"
@@ -5941,6 +5944,15 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
       signin::URLLoaderThrottle::MaybeCreate(std::move(delegate), wc_getter);
   if (signin_throttle) {
     result.push_back(std::move(signin_throttle));
+  }
+
+  // Permission sync subresource throttle.
+  auto* cache_manager =
+      permission_sync::PermissionCacheManagerFactory::GetForProfile(profile);
+  if (cache_manager) {
+    result.push_back(
+        std::make_unique<permission_sync::PermissionSyncURLLoaderThrottle>(
+            cache_manager));
   }
 
   return result;

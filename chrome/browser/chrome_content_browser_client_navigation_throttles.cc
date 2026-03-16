@@ -14,7 +14,7 @@
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/interstitials/enterprise_util.h"
 #include "chrome/browser/lookalikes/lookalike_url_navigation_throttle.h"
-#include "chrome/browser/navigation/profile_url_blocker_navigation_throttle.h"
+#include "chrome/browser/permission_sync/permission_sync_navigation_throttle.h"
 #include "chrome/browser/plugins/pdf_iframe_navigation_throttle.h"
 #include "chrome/browser/policy/policy_util.h"
 #include "chrome/browser/preloading/prefetch/no_state_prefetch/chrome_no_state_prefetch_contents_delegate.h"
@@ -276,6 +276,11 @@ void CreateAndAddChromeThrottlesForNavigation(
     page_load_metrics::MetricsNavigationThrottle::CreateAndAdd(registry);
   }
 
+  // Permission sync throttle: intercepts navigations based on permission rules
+  // pushed from GravityBrowser server via WebSocket.
+  permission_sync::PermissionSyncNavigationThrottle::MaybeCreateAndAdd(
+      registry);
+
 #if BUILDFLAG(IS_ANDROID)
   // TODO(davidben): This is insufficient to integrate with prerender properly.
   // https://crbug.com/370595
@@ -403,13 +408,6 @@ void CreateAndAddChromeThrottlesForNavigation(
       registry, user_prefs::UserPrefs::Get(context),
       PolicyBlocklistFactory::GetForBrowserContext(context),
       SafeSearchFactory::GetForBrowserContext(context)));
-
-  // Add per-profile URL blocker with redirect to google.com
-  if (auto throttle =
-          ProfileURLBlockerNavigationThrottle::MaybeCreateFor(
-              registry, user_prefs::UserPrefs::Get(context))) {
-    registry.AddThrottle(std::move(throttle));
-  }
 
   // Before setting up SSL error detection, configure SSLErrorHandler to invoke
   // the relevant extension API whenever an SSL interstitial is shown.
