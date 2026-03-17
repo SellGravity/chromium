@@ -675,24 +675,11 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
   metadata.mobile = GetMobileBitForUAMetadata();
   metadata.platform = GetPlatformForUAMetadata();
 
-  // For users providing a valid user-agent override via the command line:
-  // If kUACHOverrideBlank is enabled, set user-agent metadata with the
-  // default blank values, otherwise return the default UserAgentMetadata values
-  // to populate and send only the low entropy client hints.
-  // Notes: Sending low entropy hints with empty values may cause requests being
-  // blocked by web application firewall software, etc.
-  std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
-  if (custom_ua.has_value()) {
-    return base::FeatureList::IsEnabled(blink::features::kUACHOverrideBlank)
-               ? blink::UserAgentMetadata()
-               : metadata;
-  }
-
   if (only_low_entropy_ch) {
     return metadata;
   }
 
-  // High entropy client hints.
+  // High entropy client hints — always populate regardless of --user-agent.
   metadata.brand_full_version_list =
       GetUserAgentBrandFullVersionListInternal(std::nullopt);
   metadata.full_version = std::string(version_info::GetVersionNumber());

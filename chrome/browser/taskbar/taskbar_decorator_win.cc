@@ -13,10 +13,15 @@
 #include <memory>
 #include <utility>
 
+#include "base/command_line.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/no_destructor.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/thread_pool.h"
 #include "base/win/scoped_gdi_object.h"
@@ -193,6 +198,50 @@ void DrawTaskbarDecoration(gfx::NativeWindow window, const gfx::Image* image) {
 }
 
 void UpdateTaskbarDecoration(Profile* profile, gfx::NativeWindow window) {
+  // Custom taskbar icon text: --taskbar-title=ABC draws "ABC" on the icon
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("taskbar-title")) {
+    std::string title = command_line->GetSwitchValueASCII("taskbar-title");
+    if (!title.empty()) {
+      taskbar::DrawTaskbarDecorationString(window, title, title);
+      return;
+    }
+  }
+
+  // Auto-increment: if no --taskbar-title but --user-data-dir is set,
+  // read and increment open_count from file, display as badge
+  if (command_line && command_line->HasSwitch("user-data-dir")) {
+    static bool s_open_count_initialized = false;
+    static base::NoDestructor<std::string> s_open_count_str;
+
+    if (!s_open_count_initialized) {
+      s_open_count_initialized = true;
+      std::string user_data_dir =
+          command_line->GetSwitchValueASCII("user-data-dir");
+      if (!user_data_dir.empty()) {
+        base::FilePath count_file =
+            base::FilePath::FromUTF8Unsafe(user_data_dir)
+                .Append(FILE_PATH_LITERAL("open_count"));
+        int count = 0;
+        std::string count_content;
+        if (base::ReadFileToString(count_file, &count_content)) {
+          base::StringToInt(count_content, &count);
+        }
+        count++;
+        // Save real count to file
+        base::WriteFile(count_file, base::NumberToString(count));
+        // Cap display at "99+" for badge readability (16x16 icon)
+        *s_open_count_str = (count > 99) ? "99+" : base::NumberToString(count);
+      }
+    }
+
+    if (!s_open_count_str->empty()) {
+      taskbar::DrawTaskbarDecorationString(window, *s_open_count_str,
+                                           *s_open_count_str);
+      return;
+    }
+  }
+
   if (profile->IsGuestSession() ||
       // Browser process and profile manager may be null in tests.
       (g_browser_process && g_browser_process->profile_manager() &&

@@ -7,10 +7,12 @@
 #include <algorithm>
 #include <utility>
 
+#include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/notreached.h"
 #include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/uuid.h"
 #include "build/build_config.h"
 #include "media/base/media_permission.h"
@@ -1343,16 +1345,66 @@ void MediaDevices::DevicesEnumerated(
               audio_input_capabilities.size());
   }
 
+  // --- Media Device Count Spoofing (--media-device-count=A,B,C) ---
+  auto* cmd = base::CommandLine::ForCurrentProcess();
+  Vector<Vector<WebMediaDeviceInfo>> spoofed_enumeration;
+  const Vector<Vector<WebMediaDeviceInfo>>* devices_ptr = &enumeration;
+  // Clear capabilities when spoofing to avoid DCHECK mismatch
+  Vector<mojom::blink::VideoInputDeviceCapabilitiesPtr> spoofed_video_caps;
+  Vector<mojom::blink::AudioInputDeviceCapabilitiesPtr> spoofed_audio_caps;
+
+  if (cmd->HasSwitch("media-device-count")) {
+    std::string val = cmd->GetSwitchValueASCII("media-device-count");
+    int counts[3] = {1, 1, 1};  // default: 1 audio_in, 1 audio_out, 1 video_in
+    // Parse "A,B,C"
+    size_t pos1 = val.find(',');
+    if (pos1 != std::string::npos) {
+      size_t pos2 = val.find(',', pos1 + 1);
+      if (pos2 != std::string::npos) {
+        base::StringToInt(val.substr(0, pos1), &counts[0]);
+        base::StringToInt(val.substr(pos1 + 1, pos2 - pos1 - 1), &counts[1]);
+        base::StringToInt(val.substr(pos2 + 1), &counts[2]);
+      }
+    }
+    // Clamp values to [0, 10]
+    for (int k = 0; k < 3; k++) {
+      counts[k] = std::max(0, std::min(10, counts[k]));
+    }
+
+    // Index mapping: 0=kMediaAudioInput, 1=kMediaVideoInput, 2=kMediaAudioOutput
+    // Flag format:   counts[0]=audio_in,  counts[1]=audio_out,  counts[2]=video_in
+    int device_counts[3];
+    device_counts[0] = counts[0];  // kMediaAudioInput  ← audio_in
+    device_counts[1] = counts[2];  // kMediaVideoInput  ← video_in
+    device_counts[2] = counts[1];  // kMediaAudioOutput ← audio_out
+
+    const char* labels[3] = {"Microphone", "Camera", "Speaker"};
+    spoofed_enumeration.resize(3);
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < device_counts[i]; j++) {
+        std::string id = base::Uuid::GenerateRandomV4().AsLowercaseString();
+        std::string group = base::Uuid::GenerateRandomV4().AsLowercaseString();
+        std::string lbl = std::string(labels[i]) + " " + base::NumberToString(j + 1);
+        spoofed_enumeration[i].push_back(WebMediaDeviceInfo(id, lbl, group));
+      }
+    }
+    devices_ptr = &spoofed_enumeration;
+    // Use empty capabilities when spoofing
+    video_input_capabilities = std::move(spoofed_video_caps);
+    audio_input_capabilities = std::move(spoofed_audio_caps);
+  }
+  const auto& final_enumeration = *devices_ptr;
+
   MediaDeviceInfoVector media_devices;
   bool result_contains_nonempty_input_device_ids = false;
   for (wtf_size_t i = 0;
        i < static_cast<wtf_size_t>(
                mojom::blink::MediaDeviceType::kNumMediaDeviceTypes);
        ++i) {
-    for (wtf_size_t j = 0; j < enumeration[i].size(); ++j) {
+    for (wtf_size_t j = 0; j < final_enumeration[i].size(); ++j) {
       mojom::blink::MediaDeviceType device_type =
           static_cast<mojom::blink::MediaDeviceType>(i);
-      WebMediaDeviceInfo device_info = enumeration[i][j];
+      WebMediaDeviceInfo device_info = final_enumeration[i][j];
       String device_label = String::FromUTF8(device_info.label);
       if (device_type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
           device_type == mojom::blink::MediaDeviceType::kMediaVideoInput) {

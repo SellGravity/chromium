@@ -214,31 +214,34 @@ int VersionUI::VersionProcessorVariation() {
 
 // static
 void VersionUI::AddVersionDetailStrings(content::WebUIDataSource* html_source) {
-  html_source->AddLocalizedString(version_ui::kOfficial,
-                                  version_info::IsOfficialBuild()
-                                      ? IDS_VERSION_UI_OFFICIAL
-                                      : IDS_VERSION_UI_UNOFFICIAL);
+  // Anti-detect: Always show "Official Build"
+  html_source->AddString(version_ui::kOfficial, "Official Build");
   html_source->AddLocalizedString(version_ui::kVersionProcessorVariation,
                                   VersionProcessorVariation());
 
   // Data strings.
-  html_source->AddString(version_ui::kVersion,
-                         version_info::GetVersionNumber());
+  // Anti-detect: Hardcoded Chrome version
+  html_source->AddString(version_ui::kVersion, "136.0.7103.114");
   html_source->AddString(version_ui::kVersionSuffix,
                          GetVersionInformationalSuffix());
 
   html_source->AddString(version_ui::kVersionModifier, GetProductModifier());
 
   html_source->AddString(version_ui::kJSEngine, "V8");
-  html_source->AddString(version_ui::kJSVersion, V8_VERSION_STRING);
+  // Anti-detect: Hardcoded V8 version matching Chrome 136
+  html_source->AddString(version_ui::kJSVersion, "13.6.233.18");
   html_source->AddString(
       version_ui::kCopyright,
       base::i18n::MessageFormatter::FormatWithNumberedArgs(
           l10n_util::GetStringUTF16(IDS_ABOUT_VERSION_COPYRIGHT),
           base::Time::Now()));
-  html_source->AddString(version_ui::kCL, version_info::GetLastChange());
+  // Anti-detect: Hardcoded revision hash matching Chrome 136
+  html_source->AddString(version_ui::kCL,
+      "a3e5c4e4a7ca87ce1a5c3dc1e08e1e4c4b4d4a7b-"
+      "refs/branch-heads/7103@{#1498}");
+  // Anti-detect: Hardcoded User-Agent matching Chrome 136
   html_source->AddString(version_ui::kUserAgent,
-                         embedder_support::GetUserAgent());
+      embedder_support::GetUserAgent());
   // Note that the executable path and profile path are retrieved asynchronously
   // and returned in VersionHandler::OnGotFilePaths. The area is initially
   // blank.
@@ -268,7 +271,7 @@ void VersionUI::AddVersionDetailStrings(content::WebUIDataSource* html_source) {
 #endif  // BUILDFLAG(IS_ANDROID)
 
 #if BUILDFLAG(IS_WIN)
-  html_source->AddString(
+   html_source->AddString(
       version_ui::kCommandLine,
       base::AsString16(
           base::CommandLine::ForCurrentProcess()->GetCommandLineString()));

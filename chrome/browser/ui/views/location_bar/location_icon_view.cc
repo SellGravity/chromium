@@ -4,7 +4,9 @@
 
 #include "chrome/browser/ui/views/location_bar/location_icon_view.h"
 
+#include "base/command_line.h"
 #include "base/functional/bind.h"
+#include "base/strings/utf_string_conversions.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
 #include "chrome/browser/extensions/extension_ui_util.h"
@@ -118,8 +120,7 @@ bool LocationIconView::ShouldShowSeparator() const {
   return false;
 }
 bool LocationIconView::ShouldShowLabel() const {
-  // Always hide label to remove whitespace
-  return false;
+  return true;
 }
 bool LocationIconView::ShouldShowLabelAfterAnimation() const {
   return ShouldShowLabel();
@@ -191,26 +192,7 @@ int LocationIconView::GetMinimumLabelTextWidth() const {
 }
 
 bool LocationIconView::GetShowText() const {
-  // Always hide text in location icon view
-  return false;
-
-  // Original code commented out
-  /*
-  if (delegate_->IsEditingOrEmpty()) {
-    return false;
-  }
-
-  const auto* location_bar_model = delegate_->GetLocationBarModel();
-  const GURL& url = location_bar_model->GetURL();
-  if (url.SchemeIs(content::kChromeUIScheme) ||
-      url.SchemeIs(extensions::kExtensionScheme) ||
-      url.SchemeIs(url::kFileScheme) ||
-      url.SchemeIs(dom_distiller::kDomDistillerScheme)) {
-    return true;
-  }
-
-  return !location_bar_model->GetSecureDisplayText().empty();
-  */
+  return true;
 }
 
 const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
@@ -257,50 +239,24 @@ std::u16string GetCurrentProfileName() {
 
 }  // namespace
 std::u16string LocationIconView::GetText() const {
-  // Always return empty string to hide all text (including profile name)
-  return std::u16string();
-
-  // Original code commented out to hide profile name and all other text
-  /*
-  std::u16string profile_name = GetCurrentProfileName();
-  if (!profile_name.empty()) {
-    return profile_name;
-  }
-  if (delegate_->IsEditingOrEmpty()) {
-    return std::u16string();
-  }
-
-  if (delegate_->GetLocationBarModel()->GetURL().SchemeIs(
-          content::kChromeUIScheme)) {
-    return l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME);
-  }
-
-  if (delegate_->GetLocationBarModel()->GetURL().SchemeIs(url::kFileScheme)) {
-    return l10n_util::GetStringUTF16(IDS_OMNIBOX_FILE);
-  }
-
-  if (delegate_->GetLocationBarModel()->GetURL().SchemeIs(
-          dom_distiller::kDomDistillerScheme)) {
-    return l10n_util::GetStringUTF16(IDS_OMNIBOX_READER_MODE);
-  }
-
-  if (delegate_->GetWebContents()) {
-    // On ChromeOS, this can be called using web_contents from
-    // SimpleWebViewDialog::GetWebContents() which always returns null.
-    // TODO(crbug.com/40501128) Remove the null check and make
-    // SimpleWebViewDialog::GetWebContents return the proper web contents
-    // instead.
-    const std::u16string extension_name =
-        extensions::ui_util::GetEnabledExtensionNameForUrl(
-            delegate_->GetLocationBarModel()->GetURL(),
-            delegate_->GetWebContents()->GetBrowserContext());
-    if (!extension_name.empty()) {
-      return extension_name;
+  // If --user-agent is set, extract browser name from UA string
+  auto* cmd = base::CommandLine::ForCurrentProcess();
+  if (cmd && cmd->HasSwitch("user-agent")) {
+    std::string ua = cmd->GetSwitchValueASCII("user-agent");
+    // Find "Chrome/" in UA string (e.g. "Chrome/138.0.0.0" → "Chrome 138")
+    size_t pos = ua.find("Chrome/");
+    if (pos != std::string::npos) {
+      size_t ver_start = pos + 7;
+      size_t ver_end = ua.find('.', ver_start);
+      if (ver_end == std::string::npos) ver_end = ua.find(' ', ver_start);
+      if (ver_end == std::string::npos) ver_end = ua.length();
+      std::string major = ua.substr(ver_start, ver_end - ver_start);
+      return base::UTF8ToUTF16("Chrome " + major);
     }
   }
-  return u"Qkhai";
-  // return delegate_->GetLocationBarModel()->GetSecureDisplayText();
-  */
+
+  // Fallback: show default product name
+  return l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME);
 }
 
 bool LocationIconView::GetAnimateTextVisibilityChange() const {

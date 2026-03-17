@@ -140,9 +140,11 @@ class SessionNoiseCache {
     // Try to get seeds from command-line flags first (sandbox-safe)
     bool has_seeds_from_flags = LoadSeedsFromCommandLine(command_line);
     
+    // Always load metadata flags (hardware-concurrency, device-memory, etc.)
+    // regardless of whether noise seeds are present
+    LoadMetadataFromCommandLine(command_line);
+
     if (has_seeds_from_flags) {
-      // Also load WebGL metadata from flags
-      LoadMetadataFromCommandLine(command_line);
       return;
     }
 

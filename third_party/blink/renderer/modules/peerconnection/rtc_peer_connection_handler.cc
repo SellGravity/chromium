@@ -8,10 +8,13 @@
 
 #include <functional>
 #include <memory>
+#include <regex>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "base/command_line.h"
 
 #include "base/compiler_specific.h"
 #include "base/containers/contains.h"
@@ -2048,13 +2051,44 @@ void RTCPeerConnectionHandler::OnDataChannel(
     client_->DidAddRemoteDataChannel(std::move(channel));
 }
 
+// Replace IPv4 addresses in ICE candidate SDP string with proxy IP.
+// ICE candidate format: "candidate:... <IP> <port> typ <type> ..."
+// This prevents WebRTC from leaking the real IP when using a proxy.
+static String ReplaceIpInCandidate(const String& sdp,
+                                   const std::string& proxy_ip) {
+  std::string sdp_str = sdp.Utf8();
+  // Match IPv4 addresses (but not 0.0.0.0 or 127.0.0.1)
+  std::regex ip_regex(
+      "(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})");
+  std::string result;
+  std::sregex_iterator it(sdp_str.begin(), sdp_str.end(), ip_regex);
+  std::sregex_iterator end;
+  size_t last_pos = 0;
+
+  for (; it != end; ++it) {
+    const std::smatch& match = *it;
+    std::string ip = match[1].str();
+    // Skip localhost and unspecified addresses
+    if (ip == "0.0.0.0" || ip == "127.0.0.1") {
+      result += sdp_str.substr(last_pos, match.position() - last_pos);
+      result += ip;
+    } else {
+      result += sdp_str.substr(last_pos, match.position() - last_pos);
+      result += proxy_ip;
+    }
+    last_pos = match.position() + match.length();
+  }
+  result += sdp_str.substr(last_pos);
+  return String::FromUTF8(result);
+}
+
 void RTCPeerConnectionHandler::OnIceCandidate(const String& sdp,
-                                              const String& sdp_mid,
-                                              int sdp_mline_index,
-                                              int component,
-                                              int address_family,
-                                              const String& usernameFragment,
-                                              const String& url) {
+                                               const String& sdp_mid,
+                                               int sdp_mline_index,
+                                               int component,
+                                               int address_family,
+                                               const String& usernameFragment,
+                                               const String& url) {
   DCHECK(task_runner_->RunsTasksInCurrentSequence());
   // In order to ensure that the RTCPeerConnection is not garbage collected
   // from under the function, we keep a pointer to it on the stack.
@@ -2063,9 +2097,23 @@ void RTCPeerConnectionHandler::OnIceCandidate(const String& sdp,
     return;
   }
   TRACE_EVENT0("webrtc", "RTCPeerConnectionHandler::OnIceCandidateImpl");
+
+  // WebRTC "Base on IP Proxy": Replace real IP with proxy IP in ICE candidates.
+  // When --webrtc-proxy-ip=<IP> is set, all real IPv4 addresses in the
+  // candidate SDP are replaced with the proxy IP before exposing to JavaScript.
+  String modified_sdp = sdp;
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("webrtc-proxy-ip")) {
+    std::string proxy_ip =
+        command_line->GetSwitchValueASCII("webrtc-proxy-ip");
+    if (!proxy_ip.empty()) {
+      modified_sdp = ReplaceIpInCandidate(sdp, proxy_ip);
+    }
+  }
+
   // This line can cause garbage collection.
   auto* platform_candidate = MakeGarbageCollected<RTCIceCandidatePlatform>(
-      sdp, sdp_mid, sdp_mline_index, usernameFragment, url);
+      modified_sdp, sdp_mid, sdp_mline_index, usernameFragment, url);
   if (peer_connection_tracker_) {
     peer_connection_tracker_->TrackAddIceCandidate(
         this, platform_candidate, PeerConnectionTracker::kSourceLocal, true);

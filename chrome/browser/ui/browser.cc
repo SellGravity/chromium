@@ -786,6 +786,15 @@ gfx::Image Browser::GetCurrentPageIcon() const {
 
 std::u16string Browser::GetWindowTitleForCurrentTab(
     bool include_app_name) const {
+  // Custom taskbar title: --taskbar-title=ABC overrides everything
+  auto* cmd = base::CommandLine::ForCurrentProcess();
+  if (cmd && cmd->HasSwitch("taskbar-title")) {
+    std::string tb_title = cmd->GetSwitchValueASCII("taskbar-title");
+    if (!tb_title.empty()) {
+      return base::UTF8ToUTF16(tb_title);
+    }
+  }
+
   if (!user_title_.empty()) {
     return base::UTF8ToUTF16(user_title_);
   }
@@ -892,6 +901,15 @@ std::u16string Browser::GetWindowTitleForMaxWidth(int max_width) const {
 std::u16string Browser::GetWindowTitleFromWebContents(
     bool include_app_name,
     content::WebContents* contents) const {
+  // Custom taskbar title: --taskbar-title=ABC overrides everything
+  auto* cmd_line = base::CommandLine::ForCurrentProcess();
+  if (cmd_line && cmd_line->HasSwitch("taskbar-title")) {
+    std::string tb_title = cmd_line->GetSwitchValueASCII("taskbar-title");
+    if (!tb_title.empty()) {
+      return base::UTF8ToUTF16(tb_title);
+    }
+  }
+
   std::u16string title = base::UTF8ToUTF16(user_title_);
 
   // |contents| can be NULL because GetWindowTitleForCurrentTab is called by the
