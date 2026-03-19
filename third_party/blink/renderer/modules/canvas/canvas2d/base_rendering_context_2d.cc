@@ -136,54 +136,13 @@ bool IsContextProviderValid() {
 }
 
 // ===========================================================================
-// STEALTH CANVAS FINGERPRINTING PROTECTION - getImageData
+// STEALTH CANVAS FINGERPRINTING PROTECTION
+// Note: getImageData() noise was REMOVED because CreepJS detects it via:
+// 1. Round-trip pixel comparison (read → write → read → compare)
+// 2. Cleared canvas check (zeros should stay zeros)
+// 3. Low-entropy pattern matching against known pixel databases
+// Canvas noise is now ONLY applied in toDataURL()/toBlob() (safe, undetectable)
 // ===========================================================================
-// FNV-1a hash for deterministic noise calculation
-// MUST match the hash in html_canvas_element.cc for consistency!
-inline uint32_t FnvHashGetImageData(const uint8_t* data, size_t len, uint32_t seed) {
-  uint32_t hash = 2166136261u ^ seed;
-  for (size_t i = 0; i < len; i++) {
-    hash ^= data[i];
-    hash *= 16777619u;
-  }
-  return hash;
-}
-
-// Apply stealth noise to ImageData pixels
-// Uses SAME algorithm as ApplyStealthNoise in html_canvas_element.cc
-void ApplyStealthNoiseToImageData(uint8_t* pixels, int width, int height, 
-                                   int bytes_per_pixel, uint64_t session_seed) {
-  if (!pixels || width < 4 || height < 4) {
-    return;
-  }
-
-  size_t total_bytes = static_cast<size_t>(width) * height * bytes_per_pixel;
-  
-  // Calculate content hash from a sample of pixels (fast)
-  // Sample every ~1% of bytes to avoid hashing entire image
-  uint32_t content_hash = static_cast<uint32_t>(session_seed & 0xFFFFFFFF);
-  size_t sample_step = std::max(size_t(1), total_bytes / 100);
-  for (size_t i = 0; i < total_bytes; i += sample_step) {
-    content_hash = FnvHashGetImageData(&pixels[i], 1, content_hash);
-  }
-
-  // Determine which pixel to modify based on content hash
-  // This ensures SAME canvas content = SAME pixel modified
-  uint32_t pixel_index = content_hash % (width * height);
-  int px = pixel_index % width;
-  int py = pixel_index / width;
-  
-  // Calculate offset (ImageData is always RGBA, 4 bytes per pixel)
-  size_t row_bytes = static_cast<size_t>(width) * bytes_per_pixel;
-  size_t offset = (py * row_bytes) + (px * bytes_per_pixel);
-  
-  // Modify only the R channel by ±1 (invisible to human eye)
-  // Direction based on session seed for uniqueness
-  int delta = (session_seed & 1) ? 1 : -1;
-  int old_r = pixels[offset];
-  int new_r = std::clamp(old_r + delta, 0, 255);
-  pixels[offset] = static_cast<uint8_t>(new_r);
-}
 
 }  // namespace
 
@@ -617,19 +576,8 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
           snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
     }
-    
-    // Apply stealth noise if canvas-noise flag is set
-    // Uses SAME algorithm as toDataURL/toBlob for consistency
-    auto* cmd = base::CommandLine::ForCurrentProcess();
-    if (cmd && cmd->HasSwitch("canvas-noise") && read_pixels_successful) {
-      uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
-      uint8_t* pixels = static_cast<uint8_t*>(image_data_pixmap.writable_addr());
-      int width = static_cast<int>(image_data_pixmap.width());
-      int height = static_cast<int>(image_data_pixmap.height());
-      int bytes_per_pixel = static_cast<int>(image_data_pixmap.info().bytesPerPixel());
-      
-      ApplyStealthNoiseToImageData(pixels, width, height, bytes_per_pixel, session_seed);
-    }
+    // NOTE: getImageData() noise was REMOVED — CreepJS detects it.
+    // Canvas noise is applied only in toDataURL()/toBlob() (safe).
   }
 
   return image_data;

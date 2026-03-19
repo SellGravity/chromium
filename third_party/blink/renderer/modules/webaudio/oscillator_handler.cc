@@ -66,20 +66,7 @@ void ClampFrequency(base::span<float> frequency,
   }
 }
 
-// Helper function to apply fingerprinting noise to oscillator frequency
-void ApplyOscillatorNoise(float& frequency) {
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-  if (!command_line || !command_line->HasSwitch("audio-noise")) {
-    return;
-  }
-  
-  AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
 
-  // Apply tiny noise to frequency (imperceptible but changes fingerprint)
-  // ±0.01 Hz from ~10000 Hz = 0.0001% change
-  // ✅ Use frequency value as cache key for deterministic noise
-  frequency += noise_gen.GetNoise(frequency, -0.01f, 0.01f);
-}
 
 float DoInterpolation(double virtual_read_index,
                       float incr,
@@ -525,9 +512,6 @@ double OscillatorHandler::ProcessKRate(int n,
   const float detune_scale = DetuneToFrequencyMultiplier(detune_->FinalValue());
   frequency *= detune_scale;
   
-  // Apply fingerprinting noise to prevent consistent fingerprinting
-  ApplyOscillatorNoise(frequency);
-  
   ClampFrequency(base::span_from_ref(frequency), 1,
                  Context()->sampleRate() / 2);
   periodic_wave_->WaveDataForFundamentalFrequency(
@@ -757,9 +741,6 @@ void OscillatorHandler::Process(uint32_t frames_to_process) {
     float detune = detune_->FinalValue();
     float detune_scale = DetuneToFrequencyMultiplier(detune);
     frequency *= detune_scale;
-    
-    // Apply fingerprinting noise to prevent consistent fingerprinting
-    ApplyOscillatorNoise(frequency);
     
     ClampFrequency(base::span_from_ref(frequency), 1,
                    Context()->sampleRate() / 2);

@@ -3583,6 +3583,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
     "hardware-concurrency",
     "device-memory",
     "media-device-count",
+    "user-data-dir",
       switches::kDisableInProcessStackTraces,
       sandbox::policy::switches::kDisableLandlockSandbox,
       sandbox::policy::switches::kDisableSeccompFilterSandbox,

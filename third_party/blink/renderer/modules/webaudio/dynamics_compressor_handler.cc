@@ -18,6 +18,8 @@
 #include <string>
 #include <sstream>
 
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
+
 namespace blink {
 
 namespace {
@@ -25,12 +27,8 @@ namespace {
 // Set output to stereo by default.
 constexpr unsigned kDefaultNumberOfOutputChannels = 2;
 
-// Fingerprint identifiers for different dynamics compressor operations
-constexpr double kStandardFingerprintId = 124.04347527516074;
-constexpr const char* kFullBufferFingerprintId = "a5b57a7aadf52796121947e53afb099d0ed347f8ac05e73b30925f91447ec5f7";
-
 // ========== CACHED NOISE VALUES (computed once at startup) ==========
-// These are deterministic based on fingerprint IDs, so we compute once and cache
+// Uses session seed from SessionNoiseCache for per-profile deterministic noise
 struct CachedNoiseValues {
   float standard_threshold = 0.0f;
   float standard_knee = 0.0f;
@@ -43,11 +41,15 @@ struct CachedNoiseValues {
   void Initialize() {
     if (initialized) return;
     
-    // Standard fingerprint noise (computed once)
+    // Get audio noise seed from session cache (deterministic per-profile)
+    uint64_t audio_seed = SessionNoiseCache::GetInstance().GetAudioNoiseSeed();
+    if (audio_seed == 0) {
+      audio_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+    }
+    
+    // Standard compressor noise (computed once from session seed)
     {
-      std::hash<double> hasher;
-      auto seed = static_cast<unsigned>(hasher(kStandardFingerprintId));
-      std::mt19937 gen(seed);
+      std::mt19937 gen(static_cast<unsigned>(audio_seed));
       std::uniform_real_distribution<float> dis_threshold(-0.0001f, 0.0001f);
       std::uniform_real_distribution<float> dis_knee(-0.001f, 0.001f);
       std::uniform_real_distribution<float> dis_ratio(-0.0001f, 0.0001f);
@@ -56,11 +58,9 @@ struct CachedNoiseValues {
       standard_ratio = dis_ratio(gen);
     }
     
-    // Full buffer fingerprint noise (computed once)
+    // Full buffer compressor noise (use different salt for variation)
     {
-      std::hash<std::string> hasher;
-      auto seed = static_cast<unsigned>(hasher(kFullBufferFingerprintId));
-      std::mt19937 gen(seed);
+      std::mt19937 gen(static_cast<unsigned>(audio_seed ^ 0x7f4a7c15ULL));
       std::uniform_real_distribution<float> dis_threshold(-0.0001f, 0.0001f);
       std::uniform_real_distribution<float> dis_knee(-0.001f, 0.001f);
       std::uniform_real_distribution<float> dis_ratio(-0.0001f, 0.0001f);

@@ -42,23 +42,15 @@ class AnalyserHandler final : public AudioHandler {
   }
   void GetByteFrequencyData(DOMUint8Array* array, double current_time) {
     analyser_.GetByteFrequencyData(array, current_time);
-    // Apply fingerprinting noise to prevent consistent fingerprinting
-    ApplyFrequencyDataNoise(array);
   }
   void GetFloatTimeDomainData(DOMFloat32Array* array) {
     analyser_.GetFloatTimeDomainData(array);
   }
   void GetByteTimeDomainData(DOMUint8Array* array) {
     analyser_.GetByteTimeDomainData(array);
-    // Apply fingerprinting noise to prevent consistent fingerprinting
-    ApplyTimeDomainNoise(array);
   }
 
  private:
-  // Helper functions for fingerprinting protection
-  void ApplyFrequencyDataNoise(DOMUint8Array* frequency_data);
-  void ApplyTimeDomainNoise(DOMUint8Array* time_domain_data);
-
   AnalyserHandler(AudioNode&, float sample_rate);
 
   // AudioHandler

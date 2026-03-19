@@ -48,12 +48,9 @@ void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
   if (!font.isSubpixel())
     sk_width = SkScalarRoundToInt(sk_width);
 
-  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
-  float final_width = SkScalarToFloat(sk_width);
-  final_width = UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
-      final_width, glyph);
-
-  *width = SkiaScalarToHarfBuzzPosition(final_width);
+  *width = SkiaScalarToHarfBuzzPosition(
+      UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
+          SkScalarToFloat(sk_width), glyph));
 }
 
 void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
@@ -78,13 +75,14 @@ void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
       sk_width_array[i] = SkScalarRoundToInt(sk_width_array[i]);
   }
 
-  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
+  // Apply reduced noise for fingerprinting (±0.02px per glyph — invisible)
   for (unsigned i = 0; i < count; i++) {
     float width = SkScalarToFloat(sk_width_array[i]);
     width = UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
         width, glyph_array[i]);
     sk_width_array[i] = width;
   }
+
 
   // Copy the results back to the sparse array.
   for (unsigned i = 0; i < count;
@@ -131,7 +129,7 @@ void SkFontGetGlyphExtentsForHarfBuzz(const SkFont& font,
     sk_bounds.set(sk_bounds.roundOut());
   }
 
-  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
+  // Apply reduced noise for fingerprinting (±0.03px per glyph — invisible)
   auto& noise_gen = UnicodeGlyphsNoiseGenerator::GetInstance();
   float left = SkScalarToFloat(sk_bounds.fLeft);
   float top = SkScalarToFloat(sk_bounds.fTop);
@@ -199,12 +197,8 @@ float SkFontGetWidthForGlyph(const SkFont& font, Glyph glyph) {
   if (!font.isSubpixel())
     sk_width = SkScalarRoundToInt(sk_width);
 
-  // Apply Unicode Glyphs noise if enabled (fingerprinting protection)
-  float final_width = SkScalarToFloat(sk_width);
-  final_width = UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
-      final_width, glyph);
-
-  return final_width;
+  return UnicodeGlyphsNoiseGenerator::GetInstance().GetNoisedWidth(
+      SkScalarToFloat(sk_width), glyph);
 }
 
 hb_position_t SkiaScalarToHarfBuzzPosition(SkScalar value) {

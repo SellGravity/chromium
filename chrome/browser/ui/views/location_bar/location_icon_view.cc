@@ -239,19 +239,12 @@ std::u16string GetCurrentProfileName() {
 
 }  // namespace
 std::u16string LocationIconView::GetText() const {
-  // If --user-agent is set, extract browser name from UA string
+  // If --gra-taskbar is set, use its value as the chip label
   auto* cmd = base::CommandLine::ForCurrentProcess();
-  if (cmd && cmd->HasSwitch("user-agent")) {
-    std::string ua = cmd->GetSwitchValueASCII("user-agent");
-    // Find "Chrome/" in UA string (e.g. "Chrome/138.0.0.0" → "Chrome 138")
-    size_t pos = ua.find("Chrome/");
-    if (pos != std::string::npos) {
-      size_t ver_start = pos + 7;
-      size_t ver_end = ua.find('.', ver_start);
-      if (ver_end == std::string::npos) ver_end = ua.find(' ', ver_start);
-      if (ver_end == std::string::npos) ver_end = ua.length();
-      std::string major = ua.substr(ver_start, ver_end - ver_start);
-      return base::UTF8ToUTF16("Chrome " + major);
+  if (cmd && cmd->HasSwitch("gra-taskbar")) {
+    std::string label = cmd->GetSwitchValueASCII("gra-taskbar");
+    if (!label.empty()) {
+      return base::UTF8ToUTF16(label);
     }
   }
 

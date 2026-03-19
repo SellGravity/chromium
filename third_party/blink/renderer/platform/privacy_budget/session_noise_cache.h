@@ -133,44 +133,29 @@ class SessionNoiseCache {
       return;
     }
 
-    // SANDBOX-SAFE: Seeds are passed via command-line flags from browser process
-    // The browser process reads fingerprint_config.json and passes seeds to renderer
-    // This avoids file I/O in sandboxed renderer process
-    
     // Try to get seeds from command-line flags first (sandbox-safe)
     bool has_seeds_from_flags = LoadSeedsFromCommandLine(command_line);
     
     // Always load metadata flags (hardware-concurrency, device-memory, etc.)
-    // regardless of whether noise seeds are present
     LoadMetadataFromCommandLine(command_line);
 
     if (has_seeds_from_flags) {
       return;
     }
 
-    // Fallback: Try to read from file (only works without sandbox or in browser process)
-    // This is mainly for backward compatibility
+    // Derive deterministic seeds from user-data-dir path hash
+    // Same profile path = same seeds across restarts
+    // Different profile = different seeds (different fingerprint)
     std::string user_data_dir;
     if (command_line->HasSwitch("user-data-dir")) {
       user_data_dir = command_line->GetSwitchValueASCII("user-data-dir");
     }
 
     if (!user_data_dir.empty()) {
-      config_file_path_ = base::FilePath::FromUTF8Unsafe(user_data_dir)
-                              .Append(FILE_PATH_LITERAL("fingerprint_config.json"));
-
-      // Try to load existing config (may fail in sandbox)
-      if (LoadConfigFromFile()) {
-        return;
-      }
-    }
-
-    // No seeds from flags or file - generate random seeds
-    GenerateAllRandomSeeds();
-    
-    // Try to save (may fail in sandbox, that's OK)
-    if (!config_file_path_.empty()) {
-      SaveConfigToFile();
+      GenerateSeedsFromPath(user_data_dir);
+    } else {
+      // No user-data-dir — truly random seeds
+      GenerateAllRandomSeeds();
     }
   }
 
@@ -403,6 +388,18 @@ class SessionNoiseCache {
             config, base::JSONWriter::OPTIONS_PRETTY_PRINT, &json_output)) {
       base::WriteFile(config_file_path_, json_output);
     }
+  }
+
+  // Derive deterministic seeds from user-data-dir path hash
+  // Same path = same seeds across restarts (stored in RAM cache only)
+  void GenerateSeedsFromPath(const std::string& path) {
+    uint64_t base_hash = base::PersistentHash(path);
+    
+    // Derive 4 unique seeds using different salt multipliers
+    session_seed_ = base_hash * 0x9e3779b97f4a7c15ULL + 1;
+    fonts_noise_seed_ = base_hash * 0x517cc1b727220a95ULL + 2;
+    audio_noise_seed_ = base_hash * 0x6c62272e07bb0142ULL + 3;
+    rects_noise_seed_ = base_hash * 0xe7037ed1a0b428dbULL + 4;
   }
 
   void GenerateAllRandomSeeds() {

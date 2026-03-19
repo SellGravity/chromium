@@ -75,9 +75,7 @@ void CreateAndAddVersionUIDataSource(Profile* profile) {
   // These localized strings are used to label version details.
   static constexpr webui::LocalizedString kStrings[] = {
       {version_ui::kTitle, IDS_VERSION_UI_TITLE},
-      {version_ui::kLogoAltText, IDS_SHORT_PRODUCT_LOGO_ALT_TEXT},
       {version_ui::kApplicationLabel, IDS_PRODUCT_NAME},
-      {version_ui::kCompany, IDS_ABOUT_VERSION_COMPANY_NAME},
       {version_ui::kCopyLabel, IDS_VERSION_UI_COPY_LABEL},
       {version_ui::kCopyNotice, IDS_VERSION_UI_COPY_NOTICE},
       {version_ui::kRevision, IDS_VERSION_UI_REVISION},
@@ -104,6 +102,12 @@ void CreateAndAddVersionUIDataSource(Profile* profile) {
 #endif  // BUILDFLAG(IS_ANDROID)
   };
   html_source->AddLocalizedStrings(kStrings);
+
+  // GraBrowser: Hardcoded branding
+  html_source->AddString(version_ui::kTitle, "About GraBrowser");
+  html_source->AddString(version_ui::kLogoAltText, "GraBrowser");
+  html_source->AddString(version_ui::kApplicationLabel, "GraBrowser");
+  html_source->AddString(version_ui::kCompany, "GraBrowser Authors");
 
   VersionUI::AddVersionDetailStrings(html_source);
 
@@ -230,11 +234,9 @@ void VersionUI::AddVersionDetailStrings(content::WebUIDataSource* html_source) {
   html_source->AddString(version_ui::kJSEngine, "V8");
   // Anti-detect: Hardcoded V8 version matching Chrome 136
   html_source->AddString(version_ui::kJSVersion, "13.6.233.18");
-  html_source->AddString(
-      version_ui::kCopyright,
-      base::i18n::MessageFormatter::FormatWithNumberedArgs(
-          l10n_util::GetStringUTF16(IDS_ABOUT_VERSION_COPYRIGHT),
-          base::Time::Now()));
+  // GraBrowser: Hardcoded copyright
+  html_source->AddString(version_ui::kCopyright,
+      "Copyright 2026 GraBrowser. All rights reserved.");
   // Anti-detect: Hardcoded revision hash matching Chrome 136
   html_source->AddString(version_ui::kCL,
       "a3e5c4e4a7ca87ce1a5c3dc1e08e1e4c4b4d4a7b-"

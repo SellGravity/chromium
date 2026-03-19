@@ -227,38 +227,6 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
 
   DOMFloat32Array* channel_data = channels_[channel_index].Get();
 
-  // Apply audio fingerprinting protection on EVERY access
-  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (channel_data && command_line && command_line->HasSwitch("audio-noise")) {
-    float* data = channel_data->Data();
-    size_t length = channel_data->length();
-
-    if (data && length > 0) {
-      AudioNoiseGenerator& noise_gen = AudioNoiseGenerator::GetInstance();
-
-      // Optimized: Only noise 8 samples at start and end (16 total)
-      // Using micro-noise (±0.0001) for imperceptible audio modification
-      constexpr float kNoiseRange = 0.0001f;
-      
-      if (length <= 16) {
-        // Very small buffer: Add noise to all samples
-        for (size_t i = 0; i < length; ++i) {
-          float noise = noise_gen.GetNoise(data[i], -kNoiseRange, kNoiseRange);
-          data[i] += noise;
-        }
-      } else {
-        // Larger buffer: Add noise to first 8 and last 8 samples only
-        for (size_t i = 0; i < 8; ++i) {
-          float noise = noise_gen.GetNoise(data[i], -kNoiseRange, kNoiseRange);
-          data[i] += noise;
-        }
-        for (size_t i = length - 8; i < length; ++i) {
-          data[i] += noise_gen.GetNoise(data[i], -kNoiseRange, kNoiseRange);
-        }
-      }
-    }
-  }
-
   return NotShared<DOMFloat32Array>(channel_data);
 }
 

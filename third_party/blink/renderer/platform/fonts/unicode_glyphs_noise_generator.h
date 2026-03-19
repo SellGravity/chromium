@@ -39,7 +39,9 @@ class UnicodeGlyphsNoiseGenerator {
   bool IsEnabled() const { return noise_enabled_; }
 
   // Get noise for glyph advance width (in pixels)
-  // Returns value + noise, where noise is in range [-1.5, 1.5] pixels
+  // Returns value + noise, where noise is in range [-0.02, 0.02] pixels
+  // This is invisible per-glyph but accumulates over ~50 chars to ±1px
+  // which is enough to change integer-based fingerprints (offsetWidth)
   float GetNoisedWidth(float original_width, Glyph glyph) {
     if (!noise_enabled_) {
       return original_width;
@@ -48,7 +50,7 @@ class UnicodeGlyphsNoiseGenerator {
   }
 
   // Get noise for glyph bounds/extents (in pixels)
-  // Returns value + noise, where noise is in range [-2.0, 2.0] pixels
+  // Returns value + noise, where noise is in range [-0.03, 0.03] pixels
   float GetNoisedBounds(float original_bounds, Glyph glyph, int coord_index) {
     if (!noise_enabled_) {
       return original_bounds;
@@ -56,16 +58,11 @@ class UnicodeGlyphsNoiseGenerator {
     return original_bounds + GetBoundsNoise(original_bounds, glyph, coord_index);
   }
 
-  // Check if a character should be spoofed as non-existent
-  // Returns true ~2% of the time for fingerprinting confusion
-  bool ShouldHideCharacter(uint32_t codepoint) {
-    if (!noise_enabled_) {
-      return false;
-    }
-    uint64_t key = HashCharacter(codepoint);
-    std::mt19937_64 gen(key);
-    std::uniform_real_distribution<double> dis(0.0, 1.0);
-    return dis(gen) < 0.02;  // 2% false negative rate
+  // DISABLED: ShouldHideCharacter was hiding 2% of characters randomly
+  // causing missing glyphs on websites. Character visibility should NOT
+  // be modified — use font list randomization instead (Option C).
+  bool ShouldHideCharacter(uint32_t /*codepoint*/) {
+    return false;
   }
 
   UnicodeGlyphsNoiseGenerator(const UnicodeGlyphsNoiseGenerator&) = delete;
@@ -107,9 +104,13 @@ class UnicodeGlyphsNoiseGenerator {
       return it->value;  // Cache hit
     }
 
-    // Cache miss - generate noise in range [-1.5, 1.5] pixels
+    // Cache miss - generate noise in range [-0.02, 0.02] pixels
+    // Per-glyph: invisible (0.02px = 1/50th of a pixel)
+    // Per-word (~10 chars): ±0.06px — still invisible
+    // Per-line (~50 chars): ±0.14px — barely sub-pixel  
+    // Per-long-text (~200 chars): ±0.28px — MAY shift integer offsetWidth by 1
     std::mt19937_64 gen(key);
-    std::uniform_real_distribution<float> dis(-1.5f, 1.5f);
+    std::uniform_real_distribution<float> dis(-0.02f, 0.02f);
     float noise = dis(gen);
     width_noise_cache_.Set(key, noise);
     return noise;
@@ -123,9 +124,9 @@ class UnicodeGlyphsNoiseGenerator {
       return it->value;  // Cache hit
     }
 
-    // Cache miss - generate noise in range [-2.0, 2.0] pixels
+    // Cache miss - generate noise in range [-0.03, 0.03] pixels  
     std::mt19937_64 gen(key);
-    std::uniform_real_distribution<float> dis(-2.0f, 2.0f);
+    std::uniform_real_distribution<float> dis(-0.03f, 0.03f);
     float noise = dis(gen);
     bounds_noise_cache_.Set(key, noise);
     return noise;
