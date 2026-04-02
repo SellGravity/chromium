@@ -6,21 +6,27 @@
 
 #include <utility>
 
+#include "base/command_line.h"
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/i18n/time_formatting.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
+#include "base/process/process.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/unguessable_token.h"
 #include "base/values.h"
 #include "chrome/browser/permission_sync/permission_cache_manager.h"
+#include "content/public/browser/network_service_instance.h"
 #include "net/base/isolation_info.h"
+#include "net/proxy_resolution/proxy_config_with_annotation.h"
 #include "net/storage_access_api/status.h"
 #include "net/cookies/site_for_cookies.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
+#include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom.h"
+#include "content/public/browser/content_browser_client.h"
 #include "services/network/public/mojom/client_security_state.mojom.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "url/gurl.h"
@@ -75,9 +81,11 @@ PermissionSyncClient::PermissionSyncClient(
     : cache_manager_(cache_manager),
       profile_id_(profile_id),
       ws_url_(ws_url),
+      connection_secret_(base::UnguessableToken::Create().ToString()),
       readable_watcher_(FROM_HERE,
                         mojo::SimpleWatcher::ArmingPolicy::MANUAL) {
-  LOG(INFO) << "[PermissionSyncClient] Created for profile: " << profile_id_;
+  LOG(INFO) << "[PermissionSyncClient] Created for profile: " << profile_id_
+            << " (connection_secret generated)";
 }
 
 PermissionSyncClient::~PermissionSyncClient() {
@@ -87,6 +95,51 @@ PermissionSyncClient::~PermissionSyncClient() {
 // ============================================================================
 // Public API
 // ============================================================================
+
+void PermissionSyncClient::SetNetworkContextResolver(
+    NetworkContextResolver resolver) {
+  nc_resolver_ = std::move(resolver);
+}
+
+void PermissionSyncClient::SetStandaloneNetworkContext(
+    mojo::Remote<network::mojom::NetworkContext> standalone_nc) {
+  standalone_nc_ = std::move(standalone_nc);
+
+  // Detect Network Service restart → standalone NC pipe death.
+  standalone_nc_.set_disconnect_handler(
+      base::BindOnce(
+          &PermissionSyncClient::OnStandaloneNetworkContextDisconnected,
+          weak_factory_.GetWeakPtr()));
+
+  // Auto-set resolver to return the standalone NC.
+  nc_resolver_ = base::BindRepeating(
+      [](PermissionSyncClient* self) -> network::mojom::NetworkContext* {
+        if (self->standalone_nc_.is_bound() &&
+            self->standalone_nc_.is_connected()) {
+          return self->standalone_nc_.get();
+        }
+        return nullptr;
+      },
+      base::Unretained(this));
+}
+
+void PermissionSyncClient::Connect() {
+  if (!nc_resolver_) {
+    LOG(ERROR) << "[PermissionSyncClient] No NetworkContextResolver set";
+    return;
+  }
+
+  network::mojom::NetworkContext* nc = nc_resolver_.Run();
+  if (!nc) {
+    LOG(ERROR) << "[PermissionSyncClient] Resolver returned null NC. "
+               << "Profile may be shutting down.";
+    return;
+  }
+
+  LOG(INFO) << "[PermissionSyncClient] Resolved fresh NetworkContext "
+            << "for connection attempt";
+  Connect(nc);
+}
 
 void PermissionSyncClient::Connect(
     network::mojom::NetworkContext* network_context) {
@@ -222,6 +275,16 @@ void PermissionSyncClient::OnConnectionEstablished(
   websocket_.Bind(std::move(socket));
   client_receiver_.Bind(std::move(client_receiver));
 
+  // Detect silent Mojo pipe death (Network Service closes WebSocket
+  // without delivering OnDropChannel to the client). Without these
+  // handlers, the client would wait 45s for heartbeat timeout.
+  websocket_.set_disconnect_handler(
+      base::BindOnce(&PermissionSyncClient::OnMojoPipeDisconnected,
+                     weak_factory_.GetWeakPtr(), "websocket_"));
+  client_receiver_.set_disconnect_handler(
+      base::BindOnce(&PermissionSyncClient::OnMojoPipeDisconnected,
+                     weak_factory_.GetWeakPtr(), "client_receiver_"));
+
   readable_ = std::move(readable);
   writable_ = std::move(writable);
 
@@ -354,6 +417,13 @@ void PermissionSyncClient::HandleConnectedMessage(
   } else {
     cache_manager_->SetConnectionState(ConnectionState::SYNCING);
   }
+
+  // Start stale sync timer: if PERMISSION_SYNC doesn't arrive within
+  // kStaleSyncTimeout, the WebSocket likely died silently → reconnect.
+  stale_sync_timer_.Start(
+      FROM_HERE, kStaleSyncTimeout,
+      base::BindOnce(&PermissionSyncClient::OnStaleSyncTimeout,
+                     weak_factory_.GetWeakPtr()));
 }
 
 void PermissionSyncClient::HandlePermissionSyncMessage(
@@ -429,6 +499,14 @@ void PermissionSyncClient::HandleErrorMessage(
              << (code ? *code : "unknown")
              << " — " << (message ? *message : "no message");
 
+  if (code && *code == "ERR_SESSION_REPLAY") {
+    // Token replay detected — terminate browser immediately.
+    // Attacker copied a valid token but doesn't have the in-memory
+    // connection_secret from the original browser.
+    LOG(ERROR) << "[PermissionSyncClient] SESSION REPLAY → terminating.";
+    base::Process::TerminateCurrentProcessImmediately(1);
+  }
+
   if (code && (*code == "ERR_INVALID_PROFILE" ||
                *code == "ERR_PROTOCOL_MISMATCH")) {
     LOG(ERROR) << "[PermissionSyncClient] Fatal error. Not retrying.";
@@ -444,6 +522,22 @@ void PermissionSyncClient::SendConnectMessage() {
   base::Value::Dict payload;
   payload.Set("profile_id", profile_id_);
   payload.Set("protocol_version", 1);
+
+  // Include session_id for anti-replay validation.
+  // Extracted from --gra-token and stored as --gra-session-id during startup.
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch("gra-session-id")) {
+    std::string session_id =
+        command_line->GetSwitchValueASCII("gra-session-id");
+    if (!session_id.empty()) {
+      payload.Set("session_id", session_id);
+    }
+  }
+
+  // Connection secret: random value from THIS browser instance's memory.
+  // Server binds on first CONNECT, verifies on reconnect.
+  // Attacker has the token but NOT this secret.
+  payload.Set("connection_secret", connection_secret_);
 
   SendTextMessage(BuildJsonMessage("CONNECT", std::move(payload)));
   LOG(INFO) << "[PermissionSyncClient] Sent CONNECT for profile: "
@@ -498,7 +592,20 @@ void PermissionSyncClient::ReadFromDataPipe(
     MojoResult result,
     const mojo::HandleSignalsState& state) {
   if (result != MOJO_RESULT_OK) {
-    if (result != MOJO_RESULT_FAILED_PRECONDITION) {
+    if (result == MOJO_RESULT_FAILED_PRECONDITION) {
+      // Data pipe peer closed — WebSocket died at transport level.
+      // Trigger immediate reconnection instead of waiting for stale sync timer.
+      LOG(WARNING) << "[PermissionSyncClient] Data pipe PEER_CLOSED detected. "
+                   << "WebSocket died silently. Triggering immediate reconnect.";
+      StopHeartbeatTimer();
+      connection_timeout_timer_.Stop();
+      stale_sync_timer_.Stop();
+      ResetConnection();
+      if (!cache_manager_->HasStartupRules()) {
+        cache_manager_->SetConnectionState(ConnectionState::DISCONNECTED);
+      }
+      ScheduleReconnect();
+    } else {
       LOG(ERROR) << "[PermissionSyncClient] Read pipe error: " << result;
     }
     return;
@@ -592,9 +699,10 @@ void PermissionSyncClient::OnHeartbeatTimeout() {
 // ============================================================================
 
 void PermissionSyncClient::ScheduleReconnect() {
-  // Fix #12: Check network_context_ is still valid.
-  if (!network_context_) {
-    LOG(ERROR) << "[PermissionSyncClient] Cannot reconnect: no NetworkContext";
+  // Use resolver if available; fall back to stored pointer.
+  if (!nc_resolver_ && !network_context_) {
+    LOG(ERROR) << "[PermissionSyncClient] Cannot reconnect: "
+               << "no resolver and no NetworkContext";
     return;
   }
 
@@ -617,14 +725,27 @@ void PermissionSyncClient::ScheduleReconnect() {
 }
 
 void PermissionSyncClient::OnReconnectTimer() {
-  // Fix #12: Guard against profile destruction during reconnect wait.
-  if (!network_context_) {
-    LOG(WARNING) << "[PermissionSyncClient] NetworkContext gone. "
-                 << "Aborting reconnect.";
-    return;
-  }
   LOG(INFO) << "[PermissionSyncClient] Attempting reconnection...";
-  Connect(network_context_);
+
+  // Check if standalone NC is still alive. If not, recreate it.
+  if (standalone_nc_.is_bound() && !standalone_nc_.is_connected()) {
+    LOG(WARNING) << "[PermissionSyncClient] Standalone NC pipe disconnected. "
+                 << "Recreating before reconnect.";
+    RecreateStandaloneNetworkContext();
+  } else if (!standalone_nc_.is_bound()) {
+    LOG(WARNING) << "[PermissionSyncClient] Standalone NC not bound. "
+                 << "Creating fresh NC for reconnect.";
+    RecreateStandaloneNetworkContext();
+  }
+
+  // Use resolver-based Connect() to get a FRESH NetworkContext.
+  if (nc_resolver_) {
+    Connect();  // Calls resolver internally
+  } else if (network_context_) {
+    Connect(network_context_);  // Fallback to stored pointer
+  } else {
+    LOG(ERROR) << "[PermissionSyncClient] No NC available for reconnect.";
+  }
 }
 
 void PermissionSyncClient::ResetReconnectState() {
@@ -656,6 +777,81 @@ void PermissionSyncClient::OnStaleSyncTimeout() {
   ResetConnection();
   cache_manager_->SetConnectionState(ConnectionState::DISCONNECTED);
   ScheduleReconnect();
+}
+
+// ============================================================================
+// Mojo Pipe Disconnect Detection
+// ============================================================================
+
+void PermissionSyncClient::OnMojoPipeDisconnected(
+    const std::string& pipe_name) {
+  LOG(WARNING) << "[PermissionSyncClient] Mojo pipe '" << pipe_name
+               << "' disconnected silently (Network Service closed WebSocket "
+               << "without OnDropChannel). Triggering immediate reconnect.";
+
+  // Treat this like OnDropChannel(false, 1001, "pipe_death").
+  StopHeartbeatTimer();
+  connection_timeout_timer_.Stop();
+  stale_sync_timer_.Stop();
+  ResetConnection();
+
+  if (!cache_manager_->HasStartupRules()) {
+    cache_manager_->SetConnectionState(ConnectionState::DISCONNECTED);
+  }
+
+  ScheduleReconnect();
+}
+
+// ============================================================================
+// Standalone NetworkContext Lifecycle
+// ============================================================================
+
+void PermissionSyncClient::OnStandaloneNetworkContextDisconnected() {
+  LOG(WARNING) << "[PermissionSyncClient] Standalone NC Mojo pipe disconnected "
+               << "(Network Service restarted). Will recreate on next "
+               << "reconnect attempt.";
+  // Don't recreate immediately — the reconnect timer will handle it.
+  // Just reset the dead remote so is_bound() returns false.
+  standalone_nc_.reset();
+}
+
+void PermissionSyncClient::RecreateStandaloneNetworkContext() {
+  LOG(INFO) << "[PermissionSyncClient] Creating fresh standalone "
+            << "NetworkContext for reconnect.";
+
+  // Reset old NC if still bound (but disconnected).
+  standalone_nc_.reset();
+
+  // Create new standalone NC (same logic as InitializeSyncClient in factory).
+  auto params = network::mojom::NetworkContextParams::New();
+  params->cert_verifier_params = content::GetCertVerifierParams(
+      cert_verifier::mojom::CertVerifierCreationParams::New());
+  // DIRECT proxy: bypass all proxy for localhost WebSocket.
+  params->initial_proxy_config =
+      net::ProxyConfigWithAnnotation::CreateDirect();
+  content::CreateNetworkContextInNetworkService(
+      standalone_nc_.BindNewPipeAndPassReceiver(), std::move(params));
+
+  // Re-register disconnect handler.
+  standalone_nc_.set_disconnect_handler(
+      base::BindOnce(
+          &PermissionSyncClient::OnStandaloneNetworkContextDisconnected,
+          weak_factory_.GetWeakPtr()));
+
+  // Update resolver to point to the new NC.
+  nc_resolver_ = base::BindRepeating(
+      [](PermissionSyncClient* self) -> network::mojom::NetworkContext* {
+        if (self->standalone_nc_.is_bound() &&
+            self->standalone_nc_.is_connected()) {
+          return self->standalone_nc_.get();
+        }
+        return nullptr;
+      },
+      base::Unretained(this));
+
+  LOG(INFO) << "[PermissionSyncClient] Fresh standalone NC created. Bound="
+            << standalone_nc_.is_bound()
+            << " Connected=" << standalone_nc_.is_connected();
 }
 
 // ============================================================================

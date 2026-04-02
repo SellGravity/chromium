@@ -127,17 +127,15 @@ void DrawTaskbarDecorationString(gfx::NativeWindow window,
                                  const std::string& alt_text) {
   HWND hwnd = views::HWNDForNativeWindow(window);
 
-  // This is the color used by the Windows 10 Badge API, for platform
-  // consistency.
-  constexpr int kBackgroundColor = SkColorSetRGB(0x26, 0x25, 0x2D);
-  constexpr int kForegroundColor = SK_ColorWHITE;
+  // GraBrowser: Premium blue badge design
+  constexpr SkColor kBadgeColor = SkColorSetRGB(0x1A, 0x73, 0xE8);  // Google Blue
+  constexpr SkColor kBorderColor = SkColorSetRGB(0x42, 0xA5, 0xF5); // Light blue ring
+  constexpr SkColor kForegroundColor = SK_ColorWHITE;
   constexpr int kRadius = kOverlayIconSize / 2;
-  // The minimum gap to have between our content and the edge of the badge.
   constexpr int kMinMargin = 3;
-  // The amount of space we have to render the icon.
   constexpr int kMaxBounds = kOverlayIconSize - 2 * kMinMargin;
-  constexpr int kMaxTextSize = 24;  // Max size for our text.
-  constexpr int kMinTextSize = 7;   // Min size for our text.
+  constexpr int kMaxTextSize = 24;
+  constexpr int kMinTextSize = 7;
 
   auto badge = std::make_unique<SkBitmap>();
   badge->allocN32Pixels(kOverlayIconSize, kOverlayIconSize);
@@ -145,22 +143,29 @@ void DrawTaskbarDecorationString(gfx::NativeWindow window,
   SkCanvas canvas(*badge.get(),
                   skia::LegacyDisplayGlobals::GetSkSurfaceProps());
 
-  SkPaint paint;
-  paint.setAntiAlias(true);
-  paint.setColor(kBackgroundColor);
-
   canvas.clear(SK_ColorTRANSPARENT);
-  canvas.drawCircle(kRadius, kRadius, kRadius, paint);
 
-  paint.reset();
-  paint.setColor(kForegroundColor);
+  // Draw outer ring (light blue border)
+  SkPaint ring_paint;
+  ring_paint.setAntiAlias(true);
+  ring_paint.setColor(kBorderColor);
+  canvas.drawCircle(kRadius, kRadius, kRadius, ring_paint);
+
+  // Draw inner filled circle (main blue)
+  SkPaint fill_paint;
+  fill_paint.setAntiAlias(true);
+  fill_paint.setColor(kBadgeColor);
+  canvas.drawCircle(kRadius, kRadius, kRadius - 1, fill_paint);
+
+  // Draw text (white, bold)
+  SkPaint text_paint;
+  text_paint.setColor(kForegroundColor);
 
   SkFont font = skia::DefaultFont();
+  font.setEdging(SkFont::Edging::kSubpixelAntiAlias);
 
   SkRect bounds;
   int text_size = kMaxTextSize;
-  // Find the largest |text_size| larger than |kMinTextSize| in which
-  // |content| fits into our 16x16px icon, with margins.
   do {
     font.setSize(text_size--);
     font.measureText(content.c_str(), content.size(), SkTextEncoding::kUTF8,
@@ -171,7 +176,7 @@ void DrawTaskbarDecorationString(gfx::NativeWindow window,
   canvas.drawSimpleText(content.c_str(), content.size(), SkTextEncoding::kUTF8,
                         kRadius - bounds.width() / 2 - bounds.x(),
                         kRadius - bounds.height() / 2 - bounds.y(), font,
-                        paint);
+                        text_paint);
 
   PostSetOverlayIcon(hwnd, std::move(badge), alt_text);
 }

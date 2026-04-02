@@ -239,7 +239,8 @@ std::u16string GetCurrentProfileName() {
 
 }  // namespace
 std::u16string LocationIconView::GetText() const {
-  // If --gra-taskbar is set, use its value as the chip label
+  // If --gra-taskbar is set, use its value as the chip label.
+  // Default (no flag): show "Chromium".
   auto* cmd = base::CommandLine::ForCurrentProcess();
   if (cmd && cmd->HasSwitch("gra-taskbar")) {
     std::string label = cmd->GetSwitchValueASCII("gra-taskbar");
@@ -248,8 +249,8 @@ std::u16string LocationIconView::GetText() const {
     }
   }
 
-  // Fallback: show default product name
-  return l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME);
+  // Default: show "Chromium" (not branded product name)
+  return u"GraBrowser";
 }
 
 bool LocationIconView::GetAnimateTextVisibilityChange() const {

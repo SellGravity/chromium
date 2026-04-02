@@ -4,6 +4,8 @@
 
 #include "chrome/browser/ui/login/http_auth_coordinator.h"
 
+#include "base/command_line.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "chrome/browser/preloading/prefetch/no_state_prefetch/chrome_no_state_prefetch_contents_delegate.h"
 #include "chrome/browser/ui/login/login_handler.h"
@@ -38,6 +40,36 @@ HttpAuthCoordinator::CreateLoginDelegate(
     scoped_refptr<net::HttpResponseHeaders> response_headers,
     content::GuestPageHolder* guest,
     content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
+  // ═══ PROXY AUTO-AUTH ═══
+  // If proxy auth challenge (407) and CLI flags provide credentials,
+  // auto-supply them without showing a dialog.
+  // IMPORTANT: Must post callback asynchronously! Calling it synchronously
+  // inside CreateLoginDelegate() causes re-entrancy crash:
+  // StoragePartition sets creating_login_delegate_=true, we supply creds,
+  // network retries immediately, calls CreateLoginDelegate() again while
+  // creating_login_delegate_ is still true → DCHECK crash.
+  if (auth_info.is_proxy) {
+    auto* command_line = base::CommandLine::ForCurrentProcess();
+    if (command_line->HasSwitch("proxy-auth-user") &&
+        command_line->HasSwitch("proxy-auth-pass")) {
+      std::string user =
+          command_line->GetSwitchValueASCII("proxy-auth-user");
+      std::string pass =
+          command_line->GetSwitchValueASCII("proxy-auth-pass");
+      if (!user.empty()) {
+        auto credentials = net::AuthCredentials(base::UTF8ToUTF16(user),
+                                                base::UTF8ToUTF16(pass));
+        // Post async to break re-entrancy cycle.
+        base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+            FROM_HERE,
+            base::BindOnce(std::move(auth_required_callback),
+                           std::move(credentials)));
+        return std::make_unique<content::LoginDelegate>();
+      }
+    }
+  }
+  // ═══ END PROXY AUTO-AUTH ═══
+
   auto flow_owned = std::make_unique<Flow>(
       this, web_contents, auth_info, request_id,
       is_request_for_primary_main_frame_navigation, is_request_for_navigation,

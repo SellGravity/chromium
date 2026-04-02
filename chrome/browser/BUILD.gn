@@ -718,6 +718,8 @@ static_library("browser") {
     "metrics/variations/google_groups_manager_factory.cc",
     "metrics/variations/google_groups_manager_factory.h",
 
+    "gra_token_util.cc",
+    "gra_token_util.h",
     "permission_sync/permission_cache_manager.cc",
     "permission_sync/permission_cache_manager.h",
     "permission_sync/permission_cache_manager_factory.cc",

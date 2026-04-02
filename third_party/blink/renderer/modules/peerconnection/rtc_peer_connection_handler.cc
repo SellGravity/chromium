@@ -2051,34 +2051,59 @@ void RTCPeerConnectionHandler::OnDataChannel(
     client_->DidAddRemoteDataChannel(std::move(channel));
 }
 
-// Replace IPv4 addresses in ICE candidate SDP string with proxy IP.
+// Replace IP addresses in ICE candidate SDP string with proxy IP.
 // ICE candidate format: "candidate:... <IP> <port> typ <type> ..."
 // This prevents WebRTC from leaking the real IP when using a proxy.
+// Handles BOTH IPv4 and IPv6 addresses.
 static String ReplaceIpInCandidate(const String& sdp,
                                    const std::string& proxy_ip) {
   std::string sdp_str = sdp.Utf8();
-  // Match IPv4 addresses (but not 0.0.0.0 or 127.0.0.1)
-  std::regex ip_regex(
+
+  // Step 1: Replace IPv6 addresses first (more specific pattern).
+  // IPv6 format: groups of hex digits separated by colons, possibly with ::
+  // Example: 2001:ee0:4b42:4cb0:1697:9782:5ac4:3f1b
+  std::regex ipv6_regex(
+      "([0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{0,4}){2,7})");
+  std::string result_v6;
+  std::sregex_iterator it_v6(sdp_str.begin(), sdp_str.end(), ipv6_regex);
+  std::sregex_iterator end_v6;
+  size_t last_pos_v6 = 0;
+
+  for (; it_v6 != end_v6; ++it_v6) {
+    const std::smatch& match = *it_v6;
+    std::string ip = match[1].str();
+    result_v6 += sdp_str.substr(last_pos_v6, match.position() - last_pos_v6);
+    // Skip loopback IPv6
+    if (ip == "::1" || ip == "0:0:0:0:0:0:0:1") {
+      result_v6 += ip;
+    } else {
+      result_v6 += proxy_ip;
+    }
+    last_pos_v6 = match.position() + match.length();
+  }
+  result_v6 += sdp_str.substr(last_pos_v6);
+
+  // Step 2: Replace IPv4 addresses.
+  std::regex ipv4_regex(
       "(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})");
   std::string result;
-  std::sregex_iterator it(sdp_str.begin(), sdp_str.end(), ip_regex);
+  std::sregex_iterator it(result_v6.begin(), result_v6.end(), ipv4_regex);
   std::sregex_iterator end;
   size_t last_pos = 0;
 
   for (; it != end; ++it) {
     const std::smatch& match = *it;
     std::string ip = match[1].str();
-    // Skip localhost and unspecified addresses
+    result += result_v6.substr(last_pos, match.position() - last_pos);
+    // Skip localhost, unspecified, and private addresses
     if (ip == "0.0.0.0" || ip == "127.0.0.1") {
-      result += sdp_str.substr(last_pos, match.position() - last_pos);
       result += ip;
     } else {
-      result += sdp_str.substr(last_pos, match.position() - last_pos);
       result += proxy_ip;
     }
     last_pos = match.position() + match.length();
   }
-  result += sdp_str.substr(last_pos);
+  result += result_v6.substr(last_pos);
   return String::FromUTF8(result);
 }
 

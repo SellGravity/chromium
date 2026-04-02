@@ -16,7 +16,11 @@
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_selections.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/browser/network_service_instance.h"
 #include "content/public/browser/storage_partition.h"
+#include "net/proxy_resolution/proxy_config_with_annotation.h"
+#include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom.h"
+#include "services/network/public/mojom/network_context.mojom.h"
 
 namespace permission_sync {
 
@@ -55,27 +59,40 @@ std::string ExtractProfileId(Profile* profile) {
 // If CacheManager was already destroyed (profile shutdown), weak ptr
 // will be null and this is a no-op.
 void InitializeSyncClient(
-    base::WeakPtr<PermissionCacheManager> weak_cache_manager,
-    Profile* profile) {
+    base::WeakPtr<PermissionCacheManager> weak_cache_manager) {
   if (!weak_cache_manager) {
     LOG(WARNING) << "[PermissionSync] CacheManager destroyed before "
-                 << "background WS connect could fire (profile shutdown).";
+                 << "standalone NC could be created (profile shutdown).";
     return;
   }
 
-  // Resolve NetworkContext — should be stable by now (2s after DoFinalInit).
-  network::mojom::NetworkContext* network_context =
-      profile->GetDefaultStoragePartition()->GetNetworkContext();
-  if (!network_context) {
-    LOG(ERROR) << "[PermissionSync] NetworkContext is null after delay. "
-               << "Cannot establish WebSocket connection.";
-    return;
-  }
+  LOG(INFO) << "[PermissionSync] Creating standalone NC as reconnect fallback.";
 
-  LOG(INFO) << "[PermissionSync] Background WS connect starting "
-            << "(5s after factory creation).";
+  // Create a STANDALONE NetworkContext for reconnects.
+  // This NC is NOT tied to profile's StoragePartition lifecycle,
+  // so reconnects won't be affected by profile NC recycling.
+  mojo::Remote<network::mojom::NetworkContext> standalone_nc;
+  auto params = network::mojom::NetworkContextParams::New();
+  params->cert_verifier_params = content::GetCertVerifierParams(
+      cert_verifier::mojom::CertVerifierCreationParams::New());
+  // DIRECT proxy: bypass all proxy for localhost WebSocket.
+  params->initial_proxy_config =
+      net::ProxyConfigWithAnnotation::CreateDirect();
+  content::CreateNetworkContextInNetworkService(
+      standalone_nc.BindNewPipeAndPassReceiver(), std::move(params));
 
-  weak_cache_manager->GetSyncClient()->Connect(network_context);
+  LOG(INFO) << "[PermissionSync] Standalone NC created. Bound="
+            << standalone_nc.is_bound()
+            << " Connected=" << standalone_nc.is_connected();
+
+  // Transfer ownership to SyncClient — it keeps the NC alive.
+  // This also updates the resolver to prefer standalone NC for reconnects.
+  weak_cache_manager->GetSyncClient()->SetStandaloneNetworkContext(
+      std::move(standalone_nc));
+
+  // Do NOT call Connect() here — initial connection was already made
+  // with profile's NC in BuildServiceInstanceForBrowserContext().
+  // Standalone NC will be used automatically on reconnect via resolver.
 }
 
 }  // namespace
@@ -122,12 +139,18 @@ PermissionCacheManagerFactory::BuildServiceInstanceForBrowserContext(
   // 3. Transfer SyncClient ownership to CacheManager.
   cache_manager->SetSyncClient(std::move(sync_client));
 
+  // 3b. NC resolver (fallback) — only used if standalone NC fails.
+  //     Standalone NC is created in InitializeSyncClient() callback.
+  cache_manager->GetSyncClient()->SetNetworkContextResolver(
+      base::BindRepeating(
+          [](Profile* p) -> network::mojom::NetworkContext* {
+            return p->GetDefaultStoragePartition()->GetNetworkContext();
+          },
+          base::Unretained(profile)));
+
   // ═══════════════════════════════════════════════════════════════
   // STEP 1: Load startup rules IMMEDIATELY (no network needed)
   // ═══════════════════════════════════════════════════════════════
-  // This runs during factory construction, BEFORE any NC exists.
-  // On success, browser is operational instantly — no DEFER,
-  // no WebSocket dependency, no 1001 vulnerability.
   auto load_result = PermissionStartupLoader::Load(cache_manager.get());
 
   if (load_result.success) {
@@ -143,20 +166,23 @@ PermissionCacheManagerFactory::BuildServiceInstanceForBrowserContext(
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // STEP 2: Schedule WebSocket connection AFTER profile init
+  // STEP 2: Connect WebSocket IMMEDIATELY using profile's NC
   // ═══════════════════════════════════════════════════════════════
-  // Do NOT connect now — NC is unstable during profile init.
-  // Post task to connect after current init stack unwinds.
-  // Even if this connection gets 1001'd, browser already works
-  // because Step 1 loaded rules.
+  // Use profile's NetworkContext for the initial connection — it's
+  // properly initialized and connects fast. Standalone NC is created
+  // in the background (2s) as fallback for reconnects only.
+  cache_manager->GetSyncClient()->Connect(
+      profile->GetDefaultStoragePartition()->GetNetworkContext());
+
+  // ═══════════════════════════════════════════════════════════════
+  // STEP 3: Create standalone NC in background (fallback for reconnects)
+  // ═══════════════════════════════════════════════════════════════
+  // If profile NC gets recycled (1001), standalone NC takes over.
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
       base::BindOnce(&InitializeSyncClient,
-                     cache_manager->GetWeakPtr(),
-                     base::Unretained(profile)),
-      base::Seconds(5));  // 5s delay: give NC plenty of time to stabilize
-                          // after DoFinalInit() completes. Startup rules
-                          // are already loaded, so browser is operational.
+                     cache_manager->GetWeakPtr()),
+      base::Seconds(2));  // 2s: Network Service ready, standalone NC stable
 
   return cache_manager;
 }

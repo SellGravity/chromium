@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_PERMISSION_SYNC_PERMISSION_SYNC_CLIENT_H_
 #define CHROME_BROWSER_PERMISSION_SYNC_PERMISSION_SYNC_CLIENT_H_
 
+#include <functional>
 #include <queue>
 #include <string>
 
@@ -44,6 +45,12 @@ class PermissionSyncClient
     : public network::mojom::WebSocketHandshakeClient,
       public network::mojom::WebSocketClient {
  public:
+  // Callback that resolves a fresh NetworkContext for each connection attempt.
+  // This avoids storing a raw NC pointer that can become stale after
+  // the profile's NetworkContext is recycled (which causes 1001 errors).
+  using NetworkContextResolver =
+      base::RepeatingCallback<network::mojom::NetworkContext*()>;
+
   // |cache_manager| must outlive this object.
   // |profile_id| identifies which profile's permissions to sync.
   // |ws_url| is the WebSocket endpoint (default: ws://127.0.0.1:9800).
@@ -55,7 +62,21 @@ class PermissionSyncClient
   PermissionSyncClient(const PermissionSyncClient&) = delete;
   PermissionSyncClient& operator=(const PermissionSyncClient&) = delete;
 
-  // Initiates the WebSocket connection. Safe to call multiple times.
+  // Sets the resolver that provides a fresh NetworkContext on each connect.
+  // Must be called before Connect().
+  void SetNetworkContextResolver(NetworkContextResolver resolver);
+
+  // Takes ownership of a standalone NetworkContext (not tied to profile).
+  // This NC won't be recycled during profile init → no 1001 disconnects.
+  void SetStandaloneNetworkContext(
+      mojo::Remote<network::mojom::NetworkContext> standalone_nc);
+
+  // Initiates the WebSocket connection.
+  // Uses the registered NetworkContextResolver to get a fresh NC.
+  void Connect();
+
+  // Legacy overload: accepts a raw NC pointer (used for first connect).
+  // Prefer SetNetworkContextResolver + Connect() for reconnect safety.
   void Connect(network::mojom::NetworkContext* network_context);
 
   // Gracefully disconnects and stops all timers.
@@ -127,10 +148,26 @@ class PermissionSyncClient
   // --- STALE sync timeout ---
   void OnStaleSyncTimeout();
 
+  // --- Mojo pipe disconnect detection ---
+  // Called when websocket_ or client_receiver_ Mojo pipe disconnects
+  // silently (Network Service closes WebSocket without OnDropChannel).
+  void OnMojoPipeDisconnected(const std::string& pipe_name);
+
+  // --- Standalone NC lifecycle ---
+  // Called when standalone NC Mojo pipe disconnects (Network Service restart).
+  void OnStandaloneNetworkContextDisconnected();
+  // Recreates the standalone NC and updates the resolver.
+  void RecreateStandaloneNetworkContext();
+
   // Configuration
   const raw_ptr<PermissionCacheManager> cache_manager_;
   std::string profile_id_;
   std::string ws_url_;
+
+  // Anti-replay: random secret generated at browser startup (in-memory only).
+  // Sent with every CONNECT message. Server binds on first use and verifies
+  // on reconnect. Attacker copies token but NOT this secret.
+  const std::string connection_secret_;
 
   // Mojo WebSocket bindings
   mojo::Receiver<network::mojom::WebSocketHandshakeClient>
@@ -152,9 +189,16 @@ class PermissionSyncClient
   std::queue<uint64_t> pending_message_sizes_;
   uint64_t pending_data_length_ = 0;  // Bytes in current multi-frame message
 
-  // Fix #12: NetworkContext stored for reconnection.
-  // Set to nullptr in Disconnect() to prevent dangling pointer usage.
+  // NetworkContext resolver — called on each connect/reconnect to get
+  // a fresh NC pointer, avoiding stale pointer from NC recycling.
+  NetworkContextResolver nc_resolver_;
+
+  // Cached NC for current connection (set by resolver, cleared on reset).
   raw_ptr<network::mojom::NetworkContext> network_context_ = nullptr;
+
+  // Standalone NC: owned by this object, not tied to profile lifecycle.
+  // Created once, never recycled → eliminates 1001 disconnects.
+  mojo::Remote<network::mojom::NetworkContext> standalone_nc_;
 
   // Heartbeat timer (FRS 3.1.2: every 30 seconds)
   base::RepeatingTimer heartbeat_timer_;
@@ -164,18 +208,18 @@ class PermissionSyncClient
   // Reconnection state (FRS 3.1.3: exponential backoff)
   base::OneShotTimer reconnect_timer_;
   int reconnect_attempt_ = 0;
-  // Backoff delays: 500ms → 1s → 2s → 5s (max)
-  // Fix #1: No 0ms delay — always async via timer.
-  static constexpr int kReconnectDelaysMs[] = {500, 1000, 2000, 5000};
+  // Backoff delays: 100ms → 300ms → 1s → 3s (max)
+  // Fast initial retries for pipe death during startup.
+  static constexpr int kReconnectDelaysMs[] = {100, 300, 1000, 3000};
   static constexpr size_t kMaxReconnectIndex = 3;
 
   // Fix #11: Connection timeout (FRS 3.5.1: 5 seconds).
   base::OneShotTimer connection_timeout_timer_;
   static constexpr base::TimeDelta kConnectionTimeout = base::Seconds(5);
 
-  // Fix #6: STALE sync timeout.
+  // Fix #6: STALE sync timeout — detect missing PERMISSION_SYNC fast.
   base::OneShotTimer stale_sync_timer_;
-  static constexpr base::TimeDelta kStaleSyncTimeout = base::Seconds(10);
+  static constexpr base::TimeDelta kStaleSyncTimeout = base::Seconds(5);
 
   // Timings (FRS constants)
   static constexpr base::TimeDelta kHeartbeatInterval = base::Seconds(30);

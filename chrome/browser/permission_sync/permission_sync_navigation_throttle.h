@@ -70,6 +70,9 @@ class PermissionSyncNavigationThrottle : public content::NavigationThrottle {
   // Build a blocked error page HTML with XSS-safe URL escaping.
   static std::string CreateBlockedErrorPage(const std::string& url);
 
+  // Build a restricted internal page error for blocked chrome:// URLs.
+  static std::string CreateRestrictedPageError(const std::string& page_name);
+
   const raw_ptr<PermissionCacheManager> cache_manager_;
 
   base::WeakPtrFactory<PermissionSyncNavigationThrottle> weak_factory_{this};

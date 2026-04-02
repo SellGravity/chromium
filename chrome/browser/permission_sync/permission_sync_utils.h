@@ -6,14 +6,52 @@
 #define CHROME_BROWSER_PERMISSION_SYNC_PERMISSION_SYNC_UTILS_H_
 
 #include <string>
+#include <string_view>
 
 #include "url/gurl.h"
 
 namespace permission_sync {
 
+// ============================================================================
+// GraBrowser: Blocked chrome:// internal pages
+// ============================================================================
+// Default: ALL pages below are blocked on startup.
+// Admin can whitelist specific pages via Permission Sync server.
+// Server sends ALLOW rule for e.g. "chrome://settings" → browser allows it.
+// No CLI flag needed — server controls everything.
+
+inline bool IsBlockedChromeURL(const GURL& url) {
+  if (!url.SchemeIs("chrome")) {
+    return false;
+  }
+
+  std::string_view host = url.host();
+  return host == "version" ||        // Leaks CLI flags, paths, versions
+         host == "flags" ||          // Leaks enabled/disabled feature flags
+         host == "chrome-urls" ||    // Lists ALL chrome:// pages
+         host == "about" ||          // Alias that lists all pages
+         host == "tracing" ||        // Debug/profiling tool
+         host == "net-internals" ||  // Network debugging info
+         host == "gpu" ||            // GPU hardware info
+         host == "system" ||         // System information
+         host == "sandbox" ||        // Sandbox configuration
+         host == "policy" ||         // Applied policies
+         host == "settings" ||       // Browser settings, proxy config
+         host == "extensions" ||     // Installed extensions info
+         host == "history" ||        // Browsing history
+         host == "downloads" ||      // Download history
+         host == "components";       // Internal components & versions
+}
+
 // Returns true if the URL scheme should bypass permission checks.
 // Shared by NavigationThrottle and URLLoaderThrottle.
+// NOTE: Blocked chrome:// URLs are NOT bypassed (they must be evaluated).
 inline bool ShouldBypassScheme(const GURL& url) {
+  // Blocked chrome:// pages must NOT be bypassed.
+  if (IsBlockedChromeURL(url)) {
+    return false;
+  }
+
   return url.SchemeIs("chrome") || url.SchemeIs("chrome-extension") ||
          url.SchemeIs("devtools") || url.SchemeIs("about") ||
          url.SchemeIs("data") || url.SchemeIs("blob") ||
@@ -29,3 +67,5 @@ inline std::string ExtractDomainFromURL(const GURL& url) {
 }  // namespace permission_sync
 
 #endif  // CHROME_BROWSER_PERMISSION_SYNC_PERMISSION_SYNC_UTILS_H_
+
+

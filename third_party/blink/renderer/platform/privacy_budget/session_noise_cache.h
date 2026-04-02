@@ -20,7 +20,7 @@
 #include "base/rand_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
-#include "third_party/blink/renderer/platform/wtf/hash_map.h"
+
 
 namespace blink {
 
@@ -68,46 +68,22 @@ class SessionNoiseCache {
   // Get device memory (from JSON config, 0 = use real value)
   int GetDeviceMemory() const { return device_memory_; }
 
-  // Get cached noise for a given double value
+  // Compute deterministic noise for a given double value.
+  // Thread-safe: no shared mutable state. Same seed + same value = same noise.
   double GetNoise(double value) {
     uint64_t key = HashValue(value);
-    auto it = cache_.find(key);
-    if (it != cache_.end()) {
-      return it->value;  // Cache hit
-    }
-
-    // Simple eviction policy: clear cache if it grows too large
-    if (cache_.size() > 10000) {
-      cache_.clear();
-    }
-
-    // Cache miss - generate and store noise
     std::mt19937_64 gen(key);
     std::uniform_real_distribution<double> dis(-0.5, 0.5);
-    double noise = dis(gen);
-    cache_.Set(key, noise);
-    return noise;
+    return dis(gen);
   }
 
-  // Get cached noise with custom range
+  // Compute deterministic noise with custom range.
+  // Thread-safe: no shared mutable state.
   double GetNoiseInRange(double value, double min_noise, double max_noise) {
     uint64_t key = HashValueWithRange(value, min_noise, max_noise);
-    auto it = cache_.find(key);
-    if (it != cache_.end()) {
-      return it->value;  // Cache hit
-    }
-
-    // Simple eviction policy: clear cache if it grows too large
-    if (cache_.size() > 10000) {
-      cache_.clear();
-    }
-
-    // Cache miss - generate and store noise with custom range
     std::mt19937_64 gen(key);
     std::uniform_real_distribution<double> dis(min_noise, max_noise);
-    double noise = dis(gen);
-    cache_.Set(key, noise);
-    return noise;
+    return dis(gen);
   }
 
   SessionNoiseCache(const SessionNoiseCache&) = delete;
@@ -445,7 +421,6 @@ class SessionNoiseCache {
   int device_memory_;           // navigator.deviceMemory override
   
   base::FilePath config_file_path_;
-  HashMap<uint64_t, double> cache_;
 };
 
 }  // namespace blink

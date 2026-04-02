@@ -33,6 +33,9 @@
 #include "base/process/process.h"
 #include "base/process/process_handle.h"
 #include "base/profiler/thread_group_profiler.h"
+#include "chrome/browser/gra_token_util.h"
+#include "third_party/icu/source/common/unicode/unistr.h"
+#include "third_party/icu/source/i18n/unicode/ucal.h"
 #include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
@@ -927,6 +930,85 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
   std::string process_type =
       command_line->GetSwitchValueASCII(switches::kProcessType);
   bool is_browser_process = process_type.empty();
+
+  // ═══ GRA-TOKEN VALIDATION (browser process only) ═══
+  // Token uses Ed25519 signing: only App Manager's private key can create
+  // valid tokens. The public key embedded here can only VERIFY.
+  if (is_browser_process) {
+    if (!command_line->HasSwitch("gra-token")) {
+      // No token → silent shutdown
+      base::Process::TerminateCurrentProcessImmediately(1);
+    }
+    std::string token = command_line->GetSwitchValueASCII("gra-token");
+    if (!gra::GraTokenUtil::ValidateToken(token)) {
+      // Invalid/expired token → silent shutdown
+      base::Process::TerminateCurrentProcessImmediately(1);
+    }
+
+    // Extract session_id from token and store as switch for WS CONNECT.
+    std::string session_id = gra::GraTokenUtil::ExtractSessionId(token);
+    if (!session_id.empty()) {
+      base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
+          "gra-session-id", session_id);
+    }
+  }
+  // ═══ END GRA-TOKEN ═══
+
+  // ═══ TIMEZONE OVERRIDE ═══
+  // Modes: Real (no flag) | Base on IP (AM resolves) | Custom (user picks)
+  // App Manager resolves timezone and passes --timezone=<IANA_ID>
+  if (command_line->HasSwitch("timezone")) {
+    std::string tz_id = command_line->GetSwitchValueASCII("timezone");
+    if (!tz_id.empty()) {
+      UErrorCode status = U_ZERO_ERROR;
+      icu::UnicodeString tz_unicode =
+          icu::UnicodeString::fromUTF8(tz_id);
+      ucal_setDefaultTimeZone(tz_unicode.getTerminatedBuffer(), &status);
+    }
+  }
+  // ═══ END TIMEZONE ═══
+
+  // ═══ PROXY CREDENTIAL PARSER ═══
+  // Parse user:pass from --proxy-server=http://user:pass@host:port
+  // Chromium strips credentials from proxy URLs, so we extract them here
+  // and store as --proxy-auth-user / --proxy-auth-pass for auto-auth.
+  // Supports: http://user:pass@host:port, socks5://user:pass@host:port
+  if (command_line->HasSwitch("proxy-server") &&
+      !command_line->HasSwitch("proxy-auth-user")) {
+    std::string proxy = command_line->GetSwitchValueASCII("proxy-server");
+    // Find "://" to skip scheme
+    size_t scheme_end = proxy.find("://");
+    if (scheme_end != std::string::npos) {
+      size_t auth_start = scheme_end + 3;  // after "://"
+      size_t at_pos = proxy.find('@', auth_start);
+      if (at_pos != std::string::npos) {
+        // Extract user:pass
+        std::string userinfo = proxy.substr(auth_start, at_pos - auth_start);
+        size_t colon_pos = userinfo.find(':');
+        std::string user = (colon_pos != std::string::npos)
+                               ? userinfo.substr(0, colon_pos)
+                               : userinfo;
+        std::string pass = (colon_pos != std::string::npos)
+                               ? userinfo.substr(colon_pos + 1)
+                               : "";
+        if (!user.empty()) {
+          // Need mutable command line for AppendSwitch/RemoveSwitch
+          auto* mutable_cmd =
+              base::CommandLine::ForCurrentProcess();
+          // Store credentials for HttpAuthCoordinator auto-auth
+          mutable_cmd->AppendSwitchASCII("proxy-auth-user", user);
+          mutable_cmd->AppendSwitchASCII("proxy-auth-pass", pass);
+          // Rewrite proxy URL without credentials:
+          // http://user:pass@host:port → http://host:port
+          std::string clean_proxy =
+              proxy.substr(0, auth_start) + proxy.substr(at_pos + 1);
+          mutable_cmd->RemoveSwitch("proxy-server");
+          mutable_cmd->AppendSwitchASCII("proxy-server", clean_proxy);
+        }
+      }
+    }
+  }
+  // ═══ END PROXY CREDENTIAL PARSER ═══
 
 #if BUILDFLAG(IS_WIN)
   if (base::FeatureList::IsEnabled(features::kDisableBoostPriority) &&
