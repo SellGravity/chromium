@@ -165,17 +165,10 @@ void ClearLockedProfilesFirstBrowserKeepAlive() {
 
 // static
 void ProfilePicker::Show(Params&& params) {
-  // Re-open with new params if necessary.
-  if (g_profile_picker_view && g_profile_picker_view->MaybeReopen(params)) {
-    return;
-  }
-
-  if (g_profile_picker_view) {
-    g_profile_picker_view->UpdateParams(std::move(params));
-  } else {
-    g_profile_picker_view = new ProfilePickerView(std::move(params));
-  }
-  g_profile_picker_view->Display();
+  // GraBrowser: The Profile Picker is completely disabled.
+  // This explicitly prevents any entry point (Startup, "Manage Profiles", etc)
+  // from launching the picker UI, as they bypass PermissionSync controls.
+  return;
 }
 
 // static

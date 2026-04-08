@@ -931,27 +931,25 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
       command_line->GetSwitchValueASCII(switches::kProcessType);
   bool is_browser_process = process_type.empty();
 
-  // ═══ GRA-TOKEN VALIDATION (browser process only) ═══
-  // Token uses Ed25519 signing: only App Manager's private key can create
-  // valid tokens. The public key embedded here can only VERIFY.
-  if (is_browser_process) {
-    if (!command_line->HasSwitch("gra-token")) {
-      // No token → silent shutdown
-      base::Process::TerminateCurrentProcessImmediately(1);
-    }
-    std::string token = command_line->GetSwitchValueASCII("gra-token");
-    if (!gra::GraTokenUtil::ValidateToken(token)) {
-      // Invalid/expired token → silent shutdown
-      base::Process::TerminateCurrentProcessImmediately(1);
-    }
-
-    // Extract session_id from token and store as switch for WS CONNECT.
-    std::string session_id = gra::GraTokenUtil::ExtractSessionId(token);
-    if (!session_id.empty()) {
-      base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
-          "gra-session-id", session_id);
-    }
-  }
+  // ═══ GRA-TOKEN VALIDATION (TEMPORARILY DISABLED) ═══
+  // Token validation is temporarily disabled on the browser side
+  // to allow testing without App Manager. Server-side validation
+  // remains active. Re-enable this block when App Manager is ready.
+  //
+  // if (is_browser_process) {
+  //   if (!command_line->HasSwitch("gra-token")) {
+  //     base::Process::TerminateCurrentProcessImmediately(1);
+  //   }
+  //   std::string token = command_line->GetSwitchValueASCII("gra-token");
+  //   if (!gra::GraTokenUtil::ValidateToken(token)) {
+  //     base::Process::TerminateCurrentProcessImmediately(1);
+  //   }
+  //   std::string session_id = gra::GraTokenUtil::ExtractSessionId(token);
+  //   if (!session_id.empty()) {
+  //     base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
+  //         "gra-session-id", session_id);
+  //   }
+  // }
   // ═══ END GRA-TOKEN ═══
 
   // ═══ TIMEZONE OVERRIDE ═══

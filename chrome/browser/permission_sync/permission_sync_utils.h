@@ -47,12 +47,10 @@ inline bool IsBlockedChromeURL(const GURL& url) {
 // Shared by NavigationThrottle and URLLoaderThrottle.
 // NOTE: Blocked chrome:// URLs are NOT bypassed (they must be evaluated).
 inline bool ShouldBypassScheme(const GURL& url) {
-  // Blocked chrome:// pages must NOT be bypassed.
-  if (IsBlockedChromeURL(url)) {
-    return false;
-  }
-
-  return url.SchemeIs("chrome") || url.SchemeIs("chrome-extension") ||
+  // We no longer bypass the "chrome" scheme by default, because administrators
+  // must be able to dynamically block internal pages (e.g., password manager)
+  // via Permission Cache Manager.
+  return url.SchemeIs("chrome-extension") ||
          url.SchemeIs("devtools") || url.SchemeIs("about") ||
          url.SchemeIs("data") || url.SchemeIs("blob") ||
          url.SchemeIs("chrome-untrusted") || url.SchemeIs("file") ||

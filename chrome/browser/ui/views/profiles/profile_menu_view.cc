@@ -1218,30 +1218,8 @@ void ProfileMenuView::BuildOtherProfilesSection(
 }
 
 void ProfileMenuView::BuildProfileManagementFeatureButtons() {
-  CHECK(!profile().IsGuestSession());
-
-  AddProfileManagementFeaturesSeparator();
-
-  if (profiles::IsProfileCreationAllowed()) {
-    AddProfileManagementFeatureButton(
-        kAccountAddChromeRefreshIcon,
-        l10n_util::GetStringUTF16(IDS_PROFILE_MENU_ADD_PROFILE),
-        base::BindRepeating(&ProfileMenuView::OnAddNewProfileButtonClicked,
-                            base::Unretained(this)));
-  }
-
-  if (profiles::IsGuestModeEnabled(profile()) &&
-      !web_app::AppBrowserController::IsWebApp(&browser())) {
-    AddProfileManagementFeatureButton(
-        kAccountBoxIcon,
-        l10n_util::GetStringUTF16(IDS_PROFILE_MENU_OPEN_GUEST_PROFILE),
-        base::BindRepeating(&ProfileMenuView::OnGuestProfileButtonClicked,
-                            base::Unretained(this)));
-  }
-
-  AddProfileManagementFeatureButton(
-      kAccountManageChromeRefreshIcon,
-      l10n_util::GetStringUTF16(IDS_PROFILE_MENU_MANAGE_PROFILES),
-      base::BindRepeating(&ProfileMenuView::OnManageProfilesButtonClicked,
-                          base::Unretained(this)));
+  // GraBrowser: The entire Profile Management section (Add, Manage, Guest)
+  // is removed from the UI. This prevents users from clicking these buttons
+  // and opening unmanaged windows, which in turn could either bypass PermissionSync
+  // or trigger anti-replay disconnections.
 }

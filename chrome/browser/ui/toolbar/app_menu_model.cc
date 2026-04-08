@@ -521,50 +521,14 @@ ProfileSubMenuModel::ProfileSubMenuModel(
   BuildCustomizeProfileRow(profile);
   BuildCloseProfileRow(profile);
 
-  bool needs_separator = false;
-  const bool is_guest_mode_enabled = profiles::IsGuestModeEnabled(*profile);
-
+  // Unused profile management flags were deleted here.
   if (!profile->IsIncognitoProfile() && !profile->IsGuestSession()) {
-    AddSeparator(ui::NORMAL_SEPARATOR);
-    AddTitle(l10n_util::GetStringUTF16(IDS_OTHER_CHROME_PROFILES_TITLE));
-    auto profile_entries = GetAllOtherProfileEntriesForProfileSubMenu(profile);
-    needs_separator = !profile_entries.empty();
-    profiles::PlaceholderAvatarIconParams icon_params =
-        GetPlaceholderAvatarIconParamsVisibleAgainstColor(
-            color_provider->GetColor(ui::kColorMenuBackground));
-    for (ProfileAttributesEntry* profile_entry : profile_entries) {
-      std::u16string display_name = GetProfileMenuDisplayName(profile_entry);
-      int menu_id = GetAndIncrementNextMenuID();
-      AddItemWithIcon(
-          menu_id,
-          ui::EscapeMenuLabelAmpersands(gfx::TruncateString(
-              display_name,
-              GetLayoutConstant(APP_MENU_MAXIMUM_CHARACTER_LENGTH),
-              gfx::CHARACTER_BREAK)),
-          ui::ImageModel::FromImage(profiles::GetSizedAvatarIcon(
-              profile_entry->GetAvatarIcon(
-                  avatar_icon_size, /*use_high_res_file=*/true, icon_params),
-              avatar_icon_size, avatar_icon_size, profiles::SHAPE_CIRCLE)));
-      other_profiles_.insert({menu_id, profile_entry->GetPath()});
-    }
-
-    if (needs_separator) {
-      AddSeparator(ui::NORMAL_SEPARATOR);
-    }
-
-    if (profiles::IsProfileCreationAllowed()) {
-      AddItemWithStringIdAndVectorIcon(this, IDC_ADD_NEW_PROFILE,
-                                       IDS_ADD_NEW_PROFILE,
-                                       kAccountAddChromeRefreshIcon);
-    }
-    if (is_guest_mode_enabled) {
-      BuildGuestProfileRow(profile);
-    }
-
-    AddItemWithStringIdAndVectorIcon(this, IDC_MANAGE_CHROME_PROFILES,
-                                     IDS_MANAGE_CHROME_PROFILES,
-                                     kAccountManageChromeRefreshIcon);
+    // GraBrowser: We intentionally remove the entire "Other profiles",
+    // "Add profile", "Guest", and "Manage Chrome Profiles" section from
+    // the app menu. This prevents users from switching profiles or
+    // launching new ones which would result in token replay drops.
   }
+
 }
 
 bool ProfileSubMenuModel::IsCommandIdChecked(int command_id) const {

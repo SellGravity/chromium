@@ -210,16 +210,16 @@ bool IsGuestModeRequested(const base::CommandLine& command_line,
 }
 
 bool IsProfileCreationAllowed() {
-  const PrefService* const pref_service = g_browser_process->local_state();
-  DCHECK(pref_service);
-  return pref_service->GetBoolean(prefs::kBrowserAddPersonEnabled);
+  // GraBrowser: Always return false. Profile creation via UI is disabled
+  // to enforce strict command-line management and prevent PermissionSync bypass.
+  return false;
 }
 
 // Whether guest mode is globally disabled (for all entry points and users).
 bool IsGuestModeGloballyDisabledInternal() {
-  const PrefService* const pref_service = g_browser_process->local_state();
-  DCHECK(pref_service);
-  return !pref_service->GetBoolean(prefs::kBrowserGuestModeEnabled);
+  // GraBrowser: Always return true. Guest mode is disabled to prevent
+  // unmanaged, permission-bypassed browsing sessions.
+  return true;
 }
 
 bool IsGuestModeEnabled() {

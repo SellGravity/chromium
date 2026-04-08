@@ -123,20 +123,10 @@ bool IncognitoModePrefs::ArePlatformParentalControlsEnabled() {
 IncognitoModeAvailability IncognitoModePrefs::GetAvailabilityInternal(
     const PrefService* pref_service,
     GetAvailabilityMode mode) {
-  DCHECK(pref_service);
-  int pref_value = pref_service->GetInteger(
-      policy::policy_prefs::kIncognitoModeAvailability);
-  IncognitoModeAvailability result = kDefaultAvailability;
-  bool valid = IntToAvailability(pref_value, &result);
-  DCHECK(valid);
-  if (result != IncognitoModeAvailability::kDisabled &&
-      mode == CHECK_PARENTAL_CONTROLS && ArePlatformParentalControlsEnabled()) {
-    if (result == IncognitoModeAvailability::kForced) {
-      LOG(ERROR) << "Ignoring FORCED incognito. Parental control logging on";
-    }
-    return IncognitoModeAvailability::kDisabled;
-  }
-  return result;
+  // GraBrowser: Always disable incognito mode. Incognito profiles (OffTheRecord)
+  // bypass Permission Sync and therefore operate entirely unmanaged. This is
+  // a security risk in a strictly managed environment.
+  return policy::IncognitoModeAvailability::kDisabled;
 }
 
 // static

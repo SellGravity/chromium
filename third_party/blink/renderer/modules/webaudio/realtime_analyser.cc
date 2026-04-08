@@ -30,11 +30,14 @@
 #include <algorithm>
 #include <bit>
 #include <complex>
+#include <random>
 
+#include "base/command_line.h"
 #include "base/compiler_specific.h"
 #include "third_party/blink/renderer/platform/audio/audio_bus.h"
 #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
 #include "third_party/blink/renderer/platform/audio/vector_math.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 
 namespace blink {
@@ -66,6 +69,52 @@ void ApplyWindow(float* p, size_t n) {
 float EnsureFinite(float x, float default_value) {
   return std::isfinite(x) ? x : default_value;
 }
+
+// Check if audio noise is enabled via command-line flag
+bool IsAudioNoiseEnabled() {
+  auto* cmd = base::CommandLine::ForCurrentProcess();
+  return cmd && cmd->HasSwitch("audio-noise");
+}
+
+// Cached noise values for AnalyserNode readback methods.
+// Computed once from SessionNoiseCache audio seed, reused on every call.
+struct AnalyserNoiseCache {
+  static constexpr size_t kMaxBins = 16384;  // Max FFT size / 2
+  float frequency_noise[kMaxBins] = {};
+  float time_domain_noise[kMaxBins * 2] = {};  // Max FFT size
+  bool initialized = false;
+
+  void Initialize() {
+    if (initialized) return;
+
+    uint64_t audio_seed = SessionNoiseCache::GetInstance().GetAudioNoiseSeed();
+    if (audio_seed == 0) {
+      audio_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+    }
+
+    // Generate deterministic frequency noise (±0.0001 dB)
+    {
+      std::mt19937_64 gen(audio_seed ^ 0xA1A2A3A4A5A6A7A8ULL);
+      std::uniform_real_distribution<float> dis(-0.0001f, 0.0001f);
+      for (size_t i = 0; i < kMaxBins; ++i) {
+        frequency_noise[i] = dis(gen);
+      }
+    }
+
+    // Generate deterministic time-domain noise (±1e-7)
+    {
+      std::mt19937_64 gen(audio_seed ^ 0xB1B2B3B4B5B6B7B8ULL);
+      std::uniform_real_distribution<float> dis(-1e-7f, 1e-7f);
+      for (size_t i = 0; i < kMaxBins * 2; ++i) {
+        time_domain_noise[i] = dis(gen);
+      }
+    }
+
+    initialized = true;
+  }
+};
+
+static AnalyserNoiseCache g_analyser_noise;
 
 }  // namespace
 
@@ -107,6 +156,11 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
     DoFFTAnalysis();
   }
 
+  const bool apply_noise = IsAudioNoiseEnabled();
+  if (apply_noise) {
+    g_analyser_noise.Initialize();
+  }
+
   // Convert from linear magnitude to floating-point decibels.
   const size_t source_length = magnitude_buffer_.size();
   const size_t len = std::min(source_length, destination_array->length());
@@ -116,7 +170,10 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
 
     for (unsigned i = 0; i < len; ++i) {
       const float linear_value = UNSAFE_TODO(source[i]);
-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
+      double db_mag = audio_utilities::LinearToDecibels(linear_value);
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins) {
+        db_mag += g_analyser_noise.frequency_noise[i];
+      }
       UNSAFE_TODO(destination[i]) = static_cast<float>(db_mag);
     }
   }
@@ -133,9 +190,10 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
     DoFFTAnalysis();
   }
 
-  // FIXME: Is it worth caching the data so we don't have to do the conversion
-  // every time?  Perhaps not, since we expect many calls in the same
-  // rendering quantum.
+  const bool apply_noise = IsAudioNoiseEnabled();
+  if (apply_noise) {
+    g_analyser_noise.Initialize();
+  }
 
   // Convert from linear magnitude to unsigned-byte decibels.
   const size_t source_length = magnitude_buffer_.size();
@@ -151,7 +209,10 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
 
     for (unsigned i = 0; i < len; ++i) {
       const float linear_value = UNSAFE_TODO(source[i]);
-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
+      double db_mag = audio_utilities::LinearToDecibels(linear_value);
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins) {
+        db_mag += g_analyser_noise.frequency_noise[i];
+      }
 
       // The range m_minDecibels to m_maxDecibels will be scaled to byte values
       // from 0 to UCHAR_MAX.
@@ -169,6 +230,11 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
     DOMFloat32Array* destination_array) {
   DCHECK(IsMainThread());
   DCHECK(destination_array);
+
+  const bool apply_noise = IsAudioNoiseEnabled();
+  if (apply_noise) {
+    g_analyser_noise.Initialize();
+  }
 
   const unsigned fft_size = FftSize();
   const size_t len =
@@ -188,6 +254,9 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
           input_buffer[(i + write_index - fft_size + kInputBufferSize) %
                        kInputBufferSize]);
 
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins * 2) {
+        value += g_analyser_noise.time_domain_noise[i];
+      }
       UNSAFE_TODO(destination[i]) = value;
     }
   }
@@ -196,6 +265,11 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
 void RealtimeAnalyser::GetByteTimeDomainData(DOMUint8Array* destination_array) {
   DCHECK(IsMainThread());
   DCHECK(destination_array);
+
+  const bool apply_noise = IsAudioNoiseEnabled();
+  if (apply_noise) {
+    g_analyser_noise.Initialize();
+  }
 
   const unsigned fft_size = FftSize();
   const size_t len =
@@ -211,9 +285,13 @@ void RealtimeAnalyser::GetByteTimeDomainData(DOMUint8Array* destination_array) {
 
     for (unsigned i = 0; i < len; ++i) {
       // Buffer access is protected due to modulo operation.
-      const float value = UNSAFE_TODO(
+      float value = UNSAFE_TODO(
           input_buffer[(i + write_index - fft_size + kInputBufferSize) %
                        kInputBufferSize]);
+
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins * 2) {
+        value += g_analyser_noise.time_domain_noise[i];
+      }
 
       // Scale from nominal -1 -> +1 to unsigned byte.
       const double scaled_value = 128 * (value + 1);
