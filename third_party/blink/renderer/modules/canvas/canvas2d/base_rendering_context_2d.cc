@@ -10,7 +10,9 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <algorithm>
 
+#include "base/auto_reset.h"
 #include "base/check.h"
 #include "base/check_op.h"
 #include "base/command_line.h"
@@ -75,6 +77,7 @@
 #include "third_party/blink/renderer/platform/fonts/font_selector.h"
 #include "third_party/blink/renderer/platform/fonts/plain_text_painter.h"
 #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+#include "third_party/blink/renderer/platform/fonts/unicode_glyphs_noise_generator.h"
 #include "third_party/blink/renderer/platform/geometry/path.h"
 #include "third_party/blink/renderer/platform/graphics/bitmap_image.h"
 #include "third_party/blink/renderer/platform/graphics/blend_mode.h"
@@ -500,18 +503,13 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
 
   bool noised = false;
   if (snapshot) {
-    // Check for custom canvas-noise flag FIRST (takes priority, faster)
+    // Check for custom canvas-noise flag FIRST via its passed seed
     auto* cmd = base::CommandLine::ForCurrentProcess();
-    bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
-    
+    bool use_custom_noise = cmd && cmd->HasSwitch("canvas-seed");
     if (use_custom_noise) {
       // Custom noise is applied directly to ImageData below, not snapshot
       // This avoids expensive StaticBitmapImage recreation
       noised = true;
-    } else {
-      // Fallback to Chromium's canvas interventions
-      noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
-          GetTopExecutionContext(), snapshot);
     }
   }
   TRACE_EVENT_INSTANT(
@@ -576,8 +574,49 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
           snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
     }
-    // NOTE: getImageData() noise was REMOVED — CreepJS detects it.
-    // Canvas noise is applied only in toDataURL()/toBlob() (safe).
+    
+    // Check for custom canvas-noise flag via its passed seed and apply intelligent 1-pixel noise
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("canvas-seed")) {
+      uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+      if (session_seed != 0 && sw >= 4 && sh >= 4) {
+        uint8_t* pixels = static_cast<uint8_t*>(image_data_pixmap.writable_addr());
+        if (pixels) {
+          
+          // Count unique colors using a simple hash set mask (fast approximation)
+          uint64_t color_mask = 0;
+          int unique_colors_approx = 0;
+          
+          for (size_t i = 0; i < (size_t)(sw * sh); i++) {
+            size_t offset = i * 4;
+            uint8_t r = pixels[offset];
+            uint8_t g = pixels[offset + 1];
+            uint8_t a = pixels[offset + 3];
+            
+            if (a > 0) {
+              int color_hash = ((r << 8) ^ g) % 64;
+              if ((color_mask & (1ULL << color_hash)) == 0) {
+                color_mask |= (1ULL << color_hash);
+                unique_colors_approx++;
+                if (unique_colors_approx > 15) break;
+              }
+            }
+          }
+          
+          // INTELLIGENT BYPASS: CreepJS simple math anomaly tests use < 5 colors.
+          // Complex hashes (BrowserScan, CreepJS main hash) use > 15 unique colors natively due to anti-aliasing and gradients.
+          if (unique_colors_approx > 15) {
+            int delta = (session_seed & 1) ? 1 : -1;
+            for (size_t i = 0; i < (size_t)(sw * sh); i++) {
+              size_t offset = i * 4;
+              if (pixels[offset + 3] > 0 && pixels[offset] > 0 && pixels[offset] < 255) {
+                pixels[offset] = pixels[offset] + delta; // Shift red channel globally by 1
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   return image_data;
@@ -1079,6 +1118,10 @@ void BaseRenderingContext2D::DrawTextInternal(
     unsigned run_end,
     double* max_width,
     const Font* cluster_font) {
+  // Completely separate font noise from canvas text rendering.
+  std::optional<base::AutoReset<bool>> suppress_font_noise_in_canvas;
+  suppress_font_noise_in_canvas.emplace(&UnicodeGlyphsNoiseGenerator::SuppressNoiseFlag(), true);
+
   HTMLCanvasElement* canvas = HostAsHTMLCanvasElement();
   if (canvas) {
     // The style resolution required for fonts is not available in frame-less
@@ -1235,6 +1278,10 @@ void BaseRenderingContext2D::DrawTextInternal(
 }
 
 TextMetrics* BaseRenderingContext2D::measureText(const String& text) {
+  // Completely separate font noise from canvas text measurement.
+  std::optional<base::AutoReset<bool>> suppress_font_noise_in_canvas;
+  suppress_font_noise_in_canvas.emplace(&UnicodeGlyphsNoiseGenerator::SuppressNoiseFlag(), true);
+
   // The style resolution required for fonts is not available in frame-less
   // documents.
   HTMLCanvasElement* canvas = HostAsHTMLCanvasElement();

@@ -30,6 +30,7 @@
 #include "third_party/blink/renderer/modules/webgl/webgl_program.h"
 #include "third_party/blink/renderer/modules/webgl/webgl_query.h"
 #include "third_party/blink/renderer/modules/webgl/webgl_renderbuffer.h"
+#include "third_party/blink/renderer/modules/webgl/webgl_debug_renderer_info.h"
 #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
 #include "third_party/blink/renderer/modules/webgl/webgl_sampler.h"
 #include "third_party/blink/renderer/modules/webgl/webgl_sync.h"
@@ -4800,16 +4801,29 @@ ScriptValue WebGL2RenderingContextBase::getParameter(ScriptState* script_state,
     return ScriptValue::CreateNull(script_state->GetIsolate());
   switch (pname) {
     case GL_SHADING_LANGUAGE_VERSION: {
+      // Anti-fingerprint: sanitize only for cross-backend spoofing
+      std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
+      if (!renderer_override.empty() && renderer_override.find("D3D11") == std::string::npos) {
+        return WebGLAny(script_state,
+            String("WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)"));
+      }
       return WebGLAny(
           script_state,
           "WebGL GLSL ES 3.00 (" +
               String(ContextGL()->GetString(GL_SHADING_LANGUAGE_VERSION)) +
               ")");
     }
-    case GL_VERSION:
+    case GL_VERSION: {
+      // Anti-fingerprint: sanitize only for cross-backend spoofing
+      std::string renderer_override2 = WebGLDebugRendererInfo::GetWebGLRendererOverride();
+      if (!renderer_override2.empty() && renderer_override2.find("D3D11") == std::string::npos) {
+        return WebGLAny(script_state,
+            String("WebGL 2.0 (OpenGL ES 3.0 Chromium)"));
+      }
       return WebGLAny(
           script_state,
           "WebGL 2.0 (" + String(ContextGL()->GetString(GL_VERSION)) + ")");
+    }
 
     case GL_COPY_READ_BUFFER_BINDING:
       return WebGLAny(script_state, bound_copy_read_buffer_.Get());

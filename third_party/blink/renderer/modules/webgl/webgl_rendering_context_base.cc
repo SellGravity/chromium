@@ -29,6 +29,7 @@
 #include <utility>
 
 #include "base/bit_cast.h"
+#include "base/command_line.h"
 #include "base/compiler_specific.h"
 #include "base/containers/contains.h"
 #include "base/feature_list.h"
@@ -147,6 +148,7 @@
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/privacy_budget/identifiability_digest_helpers.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
@@ -1891,67 +1893,110 @@ WebGLRenderingContextBase::PaintRenderingResultsToSnapshot(
     Host()->DiscardResources();
   }
 
-  // The host's ResourceProvider is purged to save memory when the tab
-  // is backgrounded.
+  // Collect snapshot from whichever path succeeds.
+  // All paths converge at the noise application below.
+  scoped_refptr<StaticBitmapImage> snapshot;
 
   if (!must_paint_to_canvas_ && !cleared_content) {
     if (resource_provider_.get()) {
-      // `resource_provider_` already has the current contents.
-      return resource_provider_->Snapshot(reason);
-    }
-    if (cached_snapshot_) {
-      // `cached_snapshot__` already has the current contents.
-      return cached_snapshot_;
+      snapshot = resource_provider_->Snapshot(reason);
+    } else if (cached_snapshot_) {
+      snapshot = cached_snapshot_;
     }
   }
 
-  CanvasResourceProviderSharedImage* resource_provider =
-      GetSharedImageResourceProvider();
-  if (!resource_provider) {
-    // As a last resort, try to create and return an unaccelerated snapshot.
-    // Match the SBI configuration to that produced when using GPU compositing:
-    // N32 and premul (as set by `CopyRenderingResultsFromDrawingBuffer`) and
-    // top-left origin (the orientation that is used by
-    // `CanvasResourceProvider::Snapshot()` when it is not passed an
-    // orientation explicitly).
-    if (!cached_snapshot_) {
-      cached_snapshot_ = CopyRenderingResultsToUnacceleratedStaticBitmapImage(
-          source_buffer, viz::SharedImageFormat::N32Format(),
-          kPremul_SkAlphaType, kTopLeft_GrSurfaceOrigin);
-    }
+  if (!snapshot) {
+    CanvasResourceProviderSharedImage* resource_provider =
+        GetSharedImageResourceProvider();
+    if (!resource_provider) {
+      if (!cached_snapshot_) {
+        cached_snapshot_ = CopyRenderingResultsToUnacceleratedStaticBitmapImage(
+            source_buffer, viz::SharedImageFormat::N32Format(),
+            kPremul_SkAlphaType, kTopLeft_GrSurfaceOrigin);
+      }
+      if (cached_snapshot_) {
+        must_paint_to_canvas_ = false;
+      }
+      snapshot = cached_snapshot_;
+    } else {
+      ScopedPixelLocalStorageInterrupt scoped_pls_interrupt(this);
+      ScopedTexture2DRestorer restorer(this);
+      ScopedFramebufferRestorer fbo_restorer(this);
 
-    if (cached_snapshot_) {
-      // We successfully painted the canvas' contents.
+      if (!GetDrawingBuffer()->ResolveAndBindForReadAndDraw()) {
+        return nullptr;
+      }
+
+      bool copy_succeeded =
+          CopyRenderingResultsFromDrawingBuffer(resource_provider,
+                                                source_buffer);
+      if (!copy_succeeded) {
+        return nullptr;
+      }
+
       must_paint_to_canvas_ = false;
+      snapshot = resource_provider->Snapshot(reason);
     }
-
-    // Whether the snapshot was successfully created or not, there is nothing
-    // further we can do.
-    return cached_snapshot_;
   }
 
-  ScopedPixelLocalStorageInterrupt scoped_pls_interrupt(this);
-  // TODO(sunnyps): Why is a texture restorer needed? See if it can be removed.
-  ScopedTexture2DRestorer restorer(this);
-  ScopedFramebufferRestorer fbo_restorer(this);
-
-  // In rare situations on macOS the drawing buffer can be destroyed
-  // during the resolve process, specifically during automatic
-  // graphics switching. Guard against this.
-  if (!GetDrawingBuffer()->ResolveAndBindForReadAndDraw()) {
+  if (!snapshot) {
     return nullptr;
   }
 
-  bool copy_succeeded =
-      CopyRenderingResultsFromDrawingBuffer(resource_provider, source_buffer);
-  if (!copy_succeeded) {
-    return nullptr;
+  // Anti-fingerprint: Apply WebGL noise at the BACKING STORE level.
+  // SINGLE EXIT POINT — ALL paths (cached, unaccelerated, normal) converge here.
+  // Noise is deterministic (same seed + same pixel index = same modification),
+  // so applying it to the same image data always produces the same result.
+  // This ensures ALL readback consumers see identical noised data:
+  //   toDataURL(), drawImage(webglCanvas), createImageBitmap() → MATCH:true
+  {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    bool webgl_noise_enabled = cmd && cmd->HasSwitch("webgl-noise");
+    uint64_t seed = SessionNoiseCache::GetInstance().GetSessionSeed();
+
+    if (webgl_noise_enabled && seed != 0) {
+      sk_sp<SkImage> sk_image =
+          snapshot->PaintImageForCurrentFrame().GetSwSkImage();
+      if (sk_image) {
+        SkBitmap bitmap;
+        if (sk_image->asLegacyBitmap(&bitmap) && bitmap.getPixels()) {
+          int width = bitmap.width();
+          int height = bitmap.height();
+          uint8_t* pixels = static_cast<uint8_t*>(bitmap.getPixels());
+          int bpp = bitmap.bytesPerPixel();
+
+          if (bpp >= 4 && width > 0 && height > 0) {
+            for (int i = 0; i < width * height; i++) {
+              uint32_t val = static_cast<uint32_t>(
+                  seed ^ (i * 31) ^ ((i % width) * 11) ^ ((i / width) * 17));
+              val = (val ^ (val >> 16)) * 0x85ebca6b;
+              val = val ^ (val >> 13);
+
+              if (val % 20 == 0) {  // ~5% of pixels
+                size_t offset = i * bpp;
+                if (pixels[offset + 3] > 0) {
+                  int channel = val % 3;
+                  int direction = ((val >> 4) & 1) ? 1 : -1;
+                  int current = pixels[offset + channel];
+                  pixels[offset + channel] = static_cast<uint8_t>(
+                      std::clamp(current + direction, 0, 255));
+                }
+              }
+            }
+
+            sk_sp<SkImage> noised = SkImages::RasterFromBitmap(bitmap);
+            if (noised) {
+              snapshot = UnacceleratedStaticBitmapImage::Create(noised);
+            }
+          }
+        }
+      }
+    }
   }
 
-  // We successfully painted the canvas' contents.
-  must_paint_to_canvas_ = false;
-  return resource_provider->Snapshot(reason);
+  return snapshot;
 }
+
 
 scoped_refptr<CanvasResource>
 WebGLRenderingContextBase::PaintRenderingResultsToResource(
@@ -3654,6 +3699,29 @@ WebGLExtension* WebGLRenderingContextBase::EnableExtensionIfSupported(
       continue;
     }
 
+    // Anti-fingerprint: If extension spoofing is active, strictly reject extensions not in the spoofed list
+    auto ext_override1 = SessionNoiseCache::GetInstance().GetWebGL1ExtensionsOverride();
+    auto ext_override2 = SessionNoiseCache::GetInstance().GetWebGL2ExtensionsOverride();
+    
+    std::vector<std::string> spoofed_extensions;
+    bool use_spoofed_extensions = false;
+    
+    if (IsWebGL2() && ext_override2.has_value()) {
+      spoofed_extensions = ext_override2.value();
+      use_spoofed_extensions = true;
+    } else if (!IsWebGL2() && ext_override1.has_value()) {
+      spoofed_extensions = ext_override1.value();
+      use_spoofed_extensions = true;
+    }
+
+    if (use_spoofed_extensions) {
+      std::string ext_name(tracker->ExtensionName());
+      if (std::find(spoofed_extensions.begin(), spoofed_extensions.end(), ext_name) == spoofed_extensions.end()) {
+        // Requested extension is supported by real hardware but explicitly stripped by the GPU profile
+        return nullptr;
+      }
+    }
+
     WebGLExtension* extension = tracker->GetExtension(this, execution_context);
     if (!extension) {
       continue;
@@ -3992,11 +4060,6 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
     case GL_RENDERBUFFER_BINDING:
       return WebGLAny(script_state, renderbuffer_binding_.Get());
     case GL_RENDERER: {
-      // Check for command-line override first
-      std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
-      if (!renderer_override.empty()) {
-        return WebGLAny(script_state, String(renderer_override.c_str()));
-      }
       return WebGLAny(script_state, String("WebKit WebGL"));
     }
     case GL_SAMPLE_ALPHA_TO_COVERAGE:
@@ -4015,18 +4078,23 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
       return GetWebGLIntArrayParameter(script_state, pname);
     case GL_SCISSOR_TEST:
       return GetBooleanParameter(script_state, pname);
-    case GL_SHADING_LANGUAGE_VERSION:
+    case GL_SHADING_LANGUAGE_VERSION: {
+      // Anti-fingerprint: sanitize only for cross-backend spoofing
+      std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
+      String glsl_version_string;
+      if (!renderer_override.empty() && renderer_override.find("D3D11") == std::string::npos) {
+        glsl_version_string = String("WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)");
+      } else {
+        glsl_version_string = "WebGL GLSL ES 1.0 (" +
+            String(ContextGL()->GetString(GL_SHADING_LANGUAGE_VERSION)) + ")";
+      }
       if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
               blink::IdentifiableSurface::Type::kWebGLParameter)) {
         RecordIdentifiableGLParameterDigest(
-            pname, IdentifiabilityBenignStringToken(String(
-                       ContextGL()->GetString(GL_SHADING_LANGUAGE_VERSION))));
+            pname, IdentifiabilityBenignStringToken(glsl_version_string));
       }
-      return WebGLAny(
-          script_state,
-          "WebGL GLSL ES 1.0 (" +
-              String(ContextGL()->GetString(GL_SHADING_LANGUAGE_VERSION)) +
-              ")");
+      return WebGLAny(script_state, glsl_version_string);
+    }
     case GL_STENCIL_BACK_FAIL:
       return GetUnsignedIntParameter(script_state, pname);
     case GL_STENCIL_BACK_FUNC:
@@ -4082,23 +4150,24 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
     case GC3D_UNPACK_COLORSPACE_CONVERSION_WEBGL:
       return WebGLAny(script_state, unpack_colorspace_conversion_);
     case GL_VENDOR: {
-      // Check for command-line override first
-      std::string vendor_override = WebGLDebugRendererInfo::GetWebGLVendorOverride();
-      if (!vendor_override.empty()) {
-        return WebGLAny(script_state, String(vendor_override.c_str()));
-      }
       return WebGLAny(script_state, String("WebKit"));
     }
-    case GL_VERSION:
+    case GL_VERSION: {
+      // Anti-fingerprint: sanitize only for cross-backend spoofing
+      std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
+      String version_string;
+      if (!renderer_override.empty() && renderer_override.find("D3D11") == std::string::npos) {
+        version_string = String("WebGL 1.0 (OpenGL ES 2.0 Chromium)");
+      } else {
+        version_string = "WebGL 1.0 (" + String(ContextGL()->GetString(GL_VERSION)) + ")";
+      }
       if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
               blink::IdentifiableSurface::Type::kWebGLParameter)) {
         RecordIdentifiableGLParameterDigest(
-            pname, IdentifiabilityBenignStringToken(
-                       String(ContextGL()->GetString(GL_VERSION))));
+            pname, IdentifiabilityBenignStringToken(version_string));
       }
-      return WebGLAny(
-          script_state,
-          "WebGL 1.0 (" + String(ContextGL()->GetString(GL_VERSION)) + ")");
+      return WebGLAny(script_state, version_string);
+    }
     case GL_VIEWPORT:
       return GetWebGLIntArrayParameter(script_state, pname);
     case GL_FRAGMENT_SHADER_DERIVATIVE_HINT_OES:  // OES_standard_derivatives
@@ -4111,14 +4180,14 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
       return ScriptValue::CreateNull(script_state->GetIsolate());
     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
-        // Check for command-line override first
+        // ALWAYS call native GPU first to maintain consistent IPC timing.
+        // This prevents timing-based detection where override path (~18ns)
+        // is 40x faster than native GPU IPC path (~735ns).
+        String native_renderer = String(ContextGL()->GetString(GL_RENDERER));
         std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
-        String renderer_string;
-        if (!renderer_override.empty()) {
-          renderer_string = String(renderer_override.c_str());
-        } else {
-          renderer_string = String(ContextGL()->GetString(GL_RENDERER));
-        }
+        String renderer_string = !renderer_override.empty()
+            ? String(renderer_override.c_str())
+            : native_renderer;
 
         if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
                 blink::IdentifiableSurface::Type::kWebGLParameter)) {
@@ -4133,14 +4202,12 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
       return ScriptValue::CreateNull(script_state->GetIsolate());
     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
-        // Check for command-line override first
+        // ALWAYS call native GPU first to maintain consistent IPC timing.
+        String native_vendor = String(ContextGL()->GetString(GL_VENDOR));
         std::string vendor_override = WebGLDebugRendererInfo::GetWebGLVendorOverride();
-        String vendor_string;
-        if (!vendor_override.empty()) {
-          vendor_string = String(vendor_override.c_str());
-        } else {
-          vendor_string = String(ContextGL()->GetString(GL_VENDOR));
-        }
+        String vendor_string = !vendor_override.empty()
+            ? String(vendor_override.c_str())
+            : native_vendor;
 
         if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
                 blink::IdentifiableSurface::Type::kWebGLParameter)) {
@@ -4260,6 +4327,8 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
           value = back_draw_buffer_;
         return WebGLAny(script_state, value);
       }
+      // Anti-fingerprint: DO NOT fallback to ContextGL()->GetIntegerv()
+      // for unknown pnames — this would leak real GPU info via arbitrary GL queries.
       SynthesizeGLError(GL_INVALID_ENUM, "getParameter",
                         "invalid parameter name");
       return ScriptValue::CreateNull(script_state->GetIsolate());
@@ -4447,6 +4516,30 @@ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
       return nullptr;
   }
 
+  // Anti-fingerprint: Override shader precision if a GPU is spoofed
+  // Skip for D3D11 same-backend — WARP already reports correct D3D11 precision
+  std::string renderer_override = WebGLDebugRendererInfo::GetWebGLRendererOverride();
+  if (!renderer_override.empty() && renderer_override.find("D3D11") == std::string::npos) {
+    // Cross-backend: apply D3D11 standard precision format
+    GLint min_range = 127;
+    GLint max_range = 127;
+    GLint precision_val = 23;
+
+    if (precision_type == GL_LOW_INT || precision_type == GL_MEDIUM_INT || precision_type == GL_HIGH_INT) {
+      min_range = 31;
+      max_range = 30;
+      precision_val = 0;
+    }
+
+    auto* result = MakeGarbageCollected<WebGLShaderPrecisionFormat>(
+        min_range, max_range, precision_val);
+    if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
+            blink::IdentifiableSurface::Type::kWebGLShaderPrecisionFormat)) {
+      RecordShaderPrecisionFormatForStudy(shader_type, precision_type, result);
+    }
+    return result;
+  }
+
   GLint range[2] = {0, 0};
   GLint precision = 0;
   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
@@ -4473,9 +4566,33 @@ WebGLRenderingContextBase::getSupportedExtensions() {
 
   Vector<String> result;
 
+  // Anti-fingerprint: Filter extensions based on spoofed GPU profile.
+  // We use WebGL1 or WebGL2 profile extensions if a renderer is spoofed.
+  auto ext_override1 = SessionNoiseCache::GetInstance().GetWebGL1ExtensionsOverride();
+  auto ext_override2 = SessionNoiseCache::GetInstance().GetWebGL2ExtensionsOverride();
+  
+  std::vector<std::string> spoofed_extensions;
+  bool use_spoofed_extensions = false;
+  
+  if (IsWebGL2() && ext_override2.has_value()) {
+    spoofed_extensions = ext_override2.value();
+    use_spoofed_extensions = true;
+  } else if (!IsWebGL2() && ext_override1.has_value()) {
+    spoofed_extensions = ext_override1.value();
+    use_spoofed_extensions = true;
+  }
+
   for (ExtensionTracker* tracker : extensions_) {
     if (ExtensionSupportedAndAllowed(tracker)) {
-      result.push_back(tracker->ExtensionName());
+      if (use_spoofed_extensions) {
+        // Only return if it's in the spoofed list
+        std::string ext_name(tracker->ExtensionName());
+        if (std::find(spoofed_extensions.begin(), spoofed_extensions.end(), ext_name) != spoofed_extensions.end()) {
+          result.push_back(tracker->ExtensionName());
+        }
+      } else {
+        result.push_back(tracker->ExtensionName());
+      }
     }
   }
 
@@ -5298,6 +5415,13 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
       return;
     }
     ContextGL()->ReadPixels(x, y, width, height, format, type, data);
+
+    // Anti-fingerprint: WebGL readPixels noise DISABLED
+    // BrowserScan detects noise by comparing webglCanvas.toDataURL() (noised)
+    // vs ctx2d.drawImage(webglCanvas) -> canvas2d.toDataURL() (clean).
+    // The inconsistency between these two paths causes detection.
+    // Since WARP/D3D11 rendering is identical regardless of spoofed GPU strings,
+    // noise is unnecessary — the rendering hash naturally matches.
 
     if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
             IdentifiableSurface::Type::kWebFeature)) {
@@ -7741,6 +7865,27 @@ ScriptValue WebGLRenderingContextBase::GetBooleanArrayParameter(
 ScriptValue WebGLRenderingContextBase::GetFloatParameter(
     ScriptState* script_state,
     GLenum pname) {
+  // Anti-fingerprint: check for WebGL parameter override from JSON config
+  auto override_float = SessionNoiseCache::GetInstance().GetWebGLFloatOverride(pname);
+  if (override_float.has_value()) {
+    GLfloat value = override_float.value();
+    if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
+            blink::IdentifiableSurface::Type::kWebGLParameter)) {
+      RecordIdentifiableGLParameterDigest(pname, value);
+    }
+    return WebGLAny(script_state, value);
+  }
+  // Also check int overrides (JSON may store float params as int)
+  auto override_int = SessionNoiseCache::GetInstance().GetWebGLIntOverride(pname);
+  if (override_int.has_value()) {
+    GLfloat value = static_cast<GLfloat>(override_int.value());
+    if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
+            blink::IdentifiableSurface::Type::kWebGLParameter)) {
+      RecordIdentifiableGLParameterDigest(pname, value);
+    }
+    return WebGLAny(script_state, value);
+  }
+
   GLfloat value = 0;
   if (!isContextLost())
     ContextGL()->GetFloatv(pname, &value);
@@ -7754,6 +7899,17 @@ ScriptValue WebGLRenderingContextBase::GetFloatParameter(
 ScriptValue WebGLRenderingContextBase::GetIntParameter(
     ScriptState* script_state,
     GLenum pname) {
+  // Anti-fingerprint: check for WebGL parameter override from JSON config
+  auto override_val = SessionNoiseCache::GetInstance().GetWebGLIntOverride(pname);
+  if (override_val.has_value()) {
+    GLint value = static_cast<GLint>(override_val.value());
+    if (IdentifiabilityStudySettings::Get()->ShouldSampleType(
+            blink::IdentifiableSurface::Type::kWebGLParameter)) {
+      RecordIdentifiableGLParameterDigest(pname, value);
+    }
+    return WebGLAny(script_state, value);
+  }
+
   GLint value = 0;
   if (!isContextLost()) {
     ContextGL()->GetIntegerv(pname, &value);
@@ -7780,6 +7936,15 @@ ScriptValue WebGLRenderingContextBase::GetIntParameter(
 ScriptValue WebGLRenderingContextBase::GetInt64Parameter(
     ScriptState* script_state,
     GLenum pname) {
+  // Anti-fingerprint: check for WebGL parameter override from JSON config
+  auto override_val = SessionNoiseCache::GetInstance().GetWebGLIntOverride(pname);
+  if (override_val.has_value()) {
+    if (pname == GL_MAX_ELEMENT_INDEX) {
+      return WebGLAny(script_state, static_cast<GLint64>(static_cast<uint32_t>(override_val.value())));
+    }
+    return WebGLAny(script_state, static_cast<GLint64>(override_val.value()));
+  }
+
   GLint64 value = 0;
   if (!isContextLost())
     ContextGL()->GetInteger64v(pname, &value);
@@ -7789,6 +7954,12 @@ ScriptValue WebGLRenderingContextBase::GetInt64Parameter(
 ScriptValue WebGLRenderingContextBase::GetUnsignedIntParameter(
     ScriptState* script_state,
     GLenum pname) {
+  // Anti-fingerprint: check for WebGL parameter override from JSON config
+  auto override_val = SessionNoiseCache::GetInstance().GetWebGLIntOverride(pname);
+  if (override_val.has_value()) {
+    return WebGLAny(script_state, static_cast<unsigned>(override_val.value()));
+  }
+
   GLint value = 0;
   if (!isContextLost())
     ContextGL()->GetIntegerv(pname, &value);
@@ -7798,6 +7969,23 @@ ScriptValue WebGLRenderingContextBase::GetUnsignedIntParameter(
 ScriptValue WebGLRenderingContextBase::GetWebGLFloatArrayParameter(
     ScriptState* script_state,
     GLenum pname) {
+  // Anti-fingerprint: check for WebGL float array override from JSON config
+  auto override_arr = SessionNoiseCache::GetInstance().GetWebGLFloatArrayOverride(pname);
+  if (override_arr.has_value()) {
+    const auto& arr = override_arr.value();
+    unsigned length = static_cast<unsigned>(arr.size());
+    if (ShouldMeasureGLParam(pname)) {
+      static_assert(sizeof(float) == sizeof(int32_t));
+      blink::IdentifiableTokenBuilder builder;
+      for (unsigned i = 0; i < length; i++) {
+        builder.AddValue(base::bit_cast<int32_t>(arr[i]));
+      }
+      RecordIdentifiableGLParameterDigest(pname, builder.GetToken());
+    }
+    return WebGLAny(script_state,
+                    DOMFloat32Array::Create(base::span<const float>(arr)));
+  }
+
   std::array<GLfloat, 4> value = {0};
   if (!isContextLost())
     ContextGL()->GetFloatv(pname, value.data());
@@ -7834,6 +8022,24 @@ ScriptValue WebGLRenderingContextBase::GetWebGLFloatArrayParameter(
 ScriptValue WebGLRenderingContextBase::GetWebGLIntArrayParameter(
     ScriptState* script_state,
     GLenum pname) {
+  // Anti-fingerprint: check for WebGL int array override from JSON config
+  auto override_arr = SessionNoiseCache::GetInstance().GetWebGLIntArrayOverride(pname);
+  if (override_arr.has_value()) {
+    const auto& arr = override_arr.value();
+    unsigned length = static_cast<unsigned>(arr.size());
+    if (ShouldMeasureGLParam(pname)) {
+      blink::IdentifiableTokenBuilder builder;
+      for (unsigned i = 0; i < length; i++) {
+        builder.AddValue(arr[i]);
+      }
+      RecordIdentifiableGLParameterDigest(pname, builder.GetToken());
+    }
+    // Convert int vector to GLint span for DOMInt32Array
+    std::vector<GLint> gl_arr(arr.begin(), arr.end());
+    return WebGLAny(script_state,
+                    DOMInt32Array::Create(base::span<const GLint>(gl_arr)));
+  }
+
   std::array<GLint, 4> value = {0};
   if (!isContextLost())
     ContextGL()->GetIntegerv(pname, value.data());

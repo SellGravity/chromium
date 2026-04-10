@@ -952,6 +952,22 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
   // }
   // ═══ END GRA-TOKEN ═══
 
+  // ═══ AUTO GPU BLOCKLIST OVERRIDE ═══
+  // When --webgl-renderer is set (GPU spoofing active), automatically enable:
+  //   --ignore-gpu-blocklist: Prevents Chrome from disabling HW acceleration
+  //   --enable-unsafe-webgpu: Enables WebGPU API (required for BrowserScan)
+  // This eliminates the need to manually toggle chrome://flags per profile.
+  if (command_line->HasSwitch("webgl-renderer")) {
+    auto* mutable_cmd = base::CommandLine::ForCurrentProcess();
+    if (!mutable_cmd->HasSwitch("ignore-gpu-blocklist")) {
+      mutable_cmd->AppendSwitch("ignore-gpu-blocklist");
+    }
+    if (!mutable_cmd->HasSwitch("enable-unsafe-webgpu")) {
+      mutable_cmd->AppendSwitch("enable-unsafe-webgpu");
+    }
+  }
+  // ═══ END AUTO GPU BLOCKLIST OVERRIDE ═══
+
   // ═══ TIMEZONE OVERRIDE ═══
   // Modes: Real (no flag) | Base on IP (AM resolves) | Custom (user picks)
   // App Manager resolves timezone and passes --timezone=<IANA_ID>

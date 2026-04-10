@@ -71,7 +71,9 @@ std::string WebGLDebugRendererInfo::GetWebGLVendorOverride() {
 }
 
 // Static method to get WebGL renderer override
-// Priority: 1. fingerprint_config.json  2. CLI flag  3. empty (use real)
+// Priority: 1. JSON config  2. CLI flag  3. empty (use real)
+// Returns the string as-is — the caller is responsible for providing
+// the correct format (e.g. no PCI ID for D3D11, with PCI ID for Vulkan).
 std::string WebGLDebugRendererInfo::GetWebGLRendererOverride() {
   // Priority 1: Check JSON config (for portable fingerprint)
   const std::string& json_renderer = SessionNoiseCache::GetInstance().GetWebGLRenderer();

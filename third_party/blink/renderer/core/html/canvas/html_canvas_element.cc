@@ -148,33 +148,13 @@ namespace {
 // 
 // Anti-detect browser implementation that passes Pixelscan/CreepJS tests.
 //
-// Key principles:
-// 1. Noise is applied CONSISTENTLY across all readback methods
-// 2. Same canvas content + same session = same fingerprint
-// 3. Noise is deterministic (hash-based, not random)
-// 4. Noise is minimal (single pixel modification)
-// 5. Different sessions = different fingerprints (anti-tracking)
-//
-// The noise is applied by modifying a SINGLE pixel based on:
-// - Canvas content hash (ensures same canvas = same modification)
-// - Session seed (ensures different sessions = different fingerprints)
-// ===========================================================================
-
-// FNV-1a hash for deterministic noise calculation
-inline uint32_t FnvHash(const uint8_t* data, size_t len, uint32_t seed) {
-  uint32_t hash = 2166136261u ^ seed;
-  for (size_t i = 0; i < len; i++) {
-    hash ^= data[i];
-    hash *= 16777619u;
-  }
-  return hash;
-}
-
 // Apply stealth noise to StaticBitmapImage
-// Returns a new image with deterministic single-pixel modification
+// Returns a new image with deterministic modification
+// is_webgl: if true, applies stronger noise for WebGL contexts
 scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
     scoped_refptr<StaticBitmapImage> source_image,
-    uint64_t session_seed) {
+    uint64_t session_seed,
+    bool is_webgl = false) {
   if (!source_image) {
     return nullptr;
   }
@@ -211,42 +191,58 @@ scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
 
   int bytes_per_pixel = bitmap.bytesPerPixel();
   
-  // CRITICAL: Use width * bytes_per_pixel for calculations (no padding)
-  // This ensures the same byte layout as ImageData which has no row padding
-  size_t total_logical_bytes = static_cast<size_t>(width) * height * bytes_per_pixel;
-  
-  // Calculate content hash from a sample of pixels (fast)
-  // Sample from logical layout (skip row padding) to match getImageData
-  uint32_t content_hash = static_cast<uint32_t>(session_seed & 0xFFFFFFFF);
-  size_t sample_step = std::max(size_t(1), total_logical_bytes / 100);
-  
-  // Hash pixels row by row to handle potential row padding in SkBitmap
-  size_t logical_offset = 0;
-  for (int y = 0; y < height && logical_offset < total_logical_bytes; y++) {
-    uint8_t* row_start = pixels + (y * bitmap.rowBytes());
-    for (int x = 0; x < width * bytes_per_pixel && logical_offset < total_logical_bytes; x++) {
-      if (logical_offset % sample_step == 0) {
-        content_hash = FnvHash(&row_start[x], 1, content_hash);
+  if (is_webgl) {
+    // WebGL: GenLogin-style subtle noise — 5% of pixels, ±1, single channel
+    // Enough to change hash, too subtle for statistical detection
+    for (size_t i = 0; i < (size_t)(width * height); i++) {
+      uint32_t val = static_cast<uint32_t>(session_seed ^ (i * 31) ^ ((i % width) * 11) ^ ((i / width) * 17));
+      val = (val ^ (val >> 16)) * 0x85ebca6b;
+      val = val ^ (val >> 13);
+      
+      if (val % 20 == 0) {  // ~5% of pixels
+        size_t offset = i * bytes_per_pixel;
+        if (pixels[offset + 3] > 0) {  // Skip fully transparent
+          int channel = val % 3;  // 0=R, 1=G, 2=B
+          int direction = ((val >> 4) & 1) ? 1 : -1;
+          int current = pixels[offset + channel];
+          pixels[offset + channel] = static_cast<uint8_t>(std::clamp(current + direction, 0, 255));
+        }
       }
-      logical_offset++;
+    }
+  } else {
+    // Canvas 2D: Subtle noise that passes CreepJS
+    // Count unique colors using a simple hash set mask (fast approximation)
+    uint64_t color_mask = 0;
+    int unique_colors_approx = 0;
+    
+    for (size_t i = 0; i < (size_t)(width * height); i++) {
+      size_t offset = i * bytes_per_pixel;
+      uint8_t r = pixels[offset];
+      uint8_t g = pixels[offset + 1];
+      uint8_t a = pixels[offset + 3];
+      
+      if (a > 0) {
+        int color_hash = ((r << 8) ^ g) % 64;
+        if ((color_mask & (1ULL << color_hash)) == 0) {
+          color_mask |= (1ULL << color_hash);
+          unique_colors_approx++;
+          if (unique_colors_approx > 15) break;
+        }
+      }
+    }
+
+    // INTELLIGENT BYPASS: CreepJS simple math anomaly tests use < 5 colors.
+    // Complex hashes (BrowserScan, CreepJS main hash) use > 15 unique colors natively due to anti-aliasing and gradients.
+    if (unique_colors_approx > 15) {
+      int delta = (session_seed & 1) ? 1 : -1;
+      for (size_t i = 0; i < (size_t)(width * height); i++) {
+        size_t offset = i * bytes_per_pixel;
+        if (pixels[offset + 3] > 0 && pixels[offset] > 0 && pixels[offset] < 255) {
+          pixels[offset] = pixels[offset] + delta; // Shift red channel globally by 1
+        }
+      }
     }
   }
-
-  // Determine which pixel to modify based on content hash
-  // This ensures SAME canvas content = SAME pixel modified
-  uint32_t pixel_index = content_hash % (width * height);
-  int px = pixel_index % width;
-  int py = pixel_index / width;
-  
-  // Calculate actual offset in SkBitmap (includes potential row padding)
-  size_t actual_offset = (py * bitmap.rowBytes()) + (px * bytes_per_pixel);
-  
-  // Modify only the R channel by ±1 (invisible to human eye)
-  // Direction based on session seed for uniqueness
-  int delta = (session_seed & 1) ? 1 : -1;
-  int old_r = pixels[actual_offset];
-  int new_r = std::clamp(old_r + delta, 0, 255);
-  pixels[actual_offset] = static_cast<uint8_t>(new_r);
 
   // Create new image from modified bitmap
   sk_sp<SkImage> noised_sk_image = SkImages::RasterFromBitmap(bitmap);
@@ -1431,23 +1427,33 @@ String HTMLCanvasElement::ToDataURLInternal(
   if (image_bitmap) {
     bool noised = false;
     
-    // Check for custom canvas-noise flag
+    // Differentiate between WebGL and Canvas 2D noise
+    CanvasRenderingContext* context = RenderingContext();
     auto* cmd = base::CommandLine::ForCurrentProcess();
-    bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
+    bool use_custom_noise = false;
+    if (cmd) {
+      if (context && context->IsWebGL()) {
+        // WebGL noise DISABLED: BrowserScan detects it by comparing
+        // webglCanvas.toDataURL() vs drawImage→2D.toDataURL()
+        // Since WARP rendering is identical for all spoofed GPUs, noise is unnecessary
+        use_custom_noise = false;
+      } else {
+        use_custom_noise = cmd->HasSwitch("canvas-seed");
+      }
+    }
     
     if (use_custom_noise) {
       // Apply stealth noise - consistent across all readback methods
       uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
-      scoped_refptr<StaticBitmapImage> noised_image = 
-          ApplyStealthNoise(image_bitmap, session_seed);
-      if (noised_image) {
-        image_bitmap = noised_image;
-        noised = true;
+      if (session_seed != 0) {
+        bool is_webgl_ctx = context && context->IsWebGL();
+        scoped_refptr<StaticBitmapImage> noised_image = 
+            ApplyStealthNoise(image_bitmap, session_seed, is_webgl_ctx);
+        if (noised_image) {
+          image_bitmap = noised_image;
+          noised = true;
+        }
       }
-    } else if (readback_type == ReadbackType::kWebExposed) {
-      // Fallback to Chromium's canvas interventions (if no custom flag)
-      noised = CanvasInterventionsHelper::MaybeNoiseSnapshot(
-          GetExecutionContext(), image_bitmap);
     }
 
     // Create ImageDataBuffer from (possibly noised) image_bitmap
@@ -1471,7 +1477,7 @@ String HTMLCanvasElement::ToDataURLInternal(
     if (encoding_mime_type == kMimeTypePng) {
       UMA_HISTOGRAM_COUNTS_100000("Blink.Canvas.ToDataURLScaledDuration.PNG",
                                    scaled_time_int);
-      const CanvasRenderingContext* context = RenderingContext();
+      // Use the existing 'context' variable
       if (context) {
         UmaHistogramCompressionRatio(
             "Blink.Canvas.ToDataURLCompressionRatio.PNG", data_url,
@@ -1552,25 +1558,32 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
     auto intervention_type =
         CanvasInterventionsHelper::CanvasInterventionType::kNone;
     
-    // Check for custom canvas-noise flag
+    // Differentiate between WebGL and Canvas 2D noise
+    CanvasRenderingContext* context_ptr = RenderingContext();
     auto* cmd = base::CommandLine::ForCurrentProcess();
-    bool use_custom_noise = cmd && cmd->HasSwitch("canvas-noise");
+    bool use_custom_noise = false;
+    if (cmd) {
+      if (context_ptr && context_ptr->IsWebGL()) {
+        // WebGL noise DISABLED: BrowserScan detects it via cross-path comparison
+        use_custom_noise = false;
+      } else {
+        use_custom_noise = cmd->HasSwitch("canvas-seed");
+      }
+    }
     
     if (use_custom_noise) {
-      // Apply stealth noise - consistent across all readback methods
       uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
-      scoped_refptr<StaticBitmapImage> noised_image = 
-          ApplyStealthNoise(image_bitmap, session_seed);
-      if (noised_image) {
-        image_bitmap = noised_image;
-        intervention_type =
-            CanvasInterventionsHelper::CanvasInterventionType::kNoise;
+      if (session_seed != 0) {
+        CanvasRenderingContext* blob_context = RenderingContext();
+        bool is_webgl_ctx = blob_context && blob_context->IsWebGL();
+        scoped_refptr<StaticBitmapImage> noised_image = 
+            ApplyStealthNoise(image_bitmap, session_seed, is_webgl_ctx);
+        if (noised_image) {
+          image_bitmap = noised_image;
+          intervention_type =
+              CanvasInterventionsHelper::CanvasInterventionType::kNoise;
+        }
       }
-    } else if (CanvasInterventionsHelper::MaybeNoiseSnapshot(GetExecutionContext(),
-                                                      image_bitmap)) {
-      // Fallback to Chromium's canvas interventions
-      intervention_type =
-          CanvasInterventionsHelper::CanvasInterventionType::kNoise;
     }
     
     auto* options = ImageEncodeOptions::Create();

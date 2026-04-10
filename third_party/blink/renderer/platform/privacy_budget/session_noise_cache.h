@@ -7,7 +7,10 @@
 
 #include <chrono>
 #include <fstream>
+#include <map>
+#include <optional>
 #include <random>
+#include <vector>
 
 #include "base/bit_cast.h"
 #include "base/command_line.h"
@@ -20,6 +23,8 @@
 #include "base/rand_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
+#include "third_party/blink/renderer/platform/allow_discouraged_type.h"
+#include "third_party/blink/renderer/platform/privacy_budget/webgl_gpu_profiles.h"
 
 
 namespace blink {
@@ -41,17 +46,18 @@ class SessionNoiseCache {
     return *instance;
   }
 
-  // Get the session seed (for debugging/logging)
+  // Get the session seed — independent of --webgl-renderer
   uint64_t GetSessionSeed() const { return session_seed_; }
   
-  // Get fonts noise seed
+  // Get fonts noise seed — independent of --webgl-renderer
   uint64_t GetFontsNoiseSeed() const { return fonts_noise_seed_; }
   
-  // Get audio noise seed  
+  // Get audio noise seed — independent of --webgl-renderer
   uint64_t GetAudioNoiseSeed() const { return audio_noise_seed_; }
   
-  // Get rects noise seed
+  // Get rects noise seed — independent of --webgl-renderer
   uint64_t GetRectsNoiseSeed() const { return rects_noise_seed_; }
+
 
   // Get WebGL vendor (from JSON config or CLI)
   const std::string& GetWebGLVendor() const { return webgl_vendor_; }
@@ -67,6 +73,76 @@ class SessionNoiseCache {
   
   // Get device memory (from JSON config, 0 = use real value)
   int GetDeviceMemory() const { return device_memory_; }
+
+  // Ensures GPU profile is dynamically applied if it hasn't been yet.
+  // This bypasses early-initialization timing bugs where CommandLine might not have switches during constructor.
+  void EnsureGpuProfileApplied() {
+    if (webgl_renderer_.empty()) {
+      auto* cmd = ::base::CommandLine::ForCurrentProcess();
+      if (cmd && cmd->HasSwitch("webgl-renderer")) {
+        webgl_renderer_ = cmd->GetSwitchValueASCII("webgl-renderer");
+        ApplyGpuProfileIfNeeded();
+      }
+    }
+  }
+
+  // --- WebGL Parameter Override Accessors ---
+  // Returns spoofed integer value for a GL parameter, if configured.
+  std::optional<int> GetWebGLIntOverride(unsigned int pname) {
+    EnsureGpuProfileApplied();
+    auto it = webgl_int_overrides_.find(pname);
+    if (it != webgl_int_overrides_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  // Returns spoofed float value for a GL parameter, if configured.
+  std::optional<float> GetWebGLFloatOverride(unsigned int pname) {
+    EnsureGpuProfileApplied();
+    auto it = webgl_float_overrides_.find(pname);
+    if (it != webgl_float_overrides_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  // Returns spoofed float array for a GL parameter (e.g. ALIASED_POINT_SIZE_RANGE).
+  std::optional<std::vector<float>> GetWebGLFloatArrayOverride(unsigned int pname) {
+    EnsureGpuProfileApplied();
+    auto it = webgl_float_array_overrides_.find(pname);
+    if (it != webgl_float_array_overrides_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  // Returns spoofed int array for a GL parameter (e.g. MAX_VIEWPORT_DIMS).
+  std::optional<std::vector<int>> GetWebGLIntArrayOverride(unsigned int pname) {
+    EnsureGpuProfileApplied();
+    auto it = webgl_int_array_overrides_.find(pname);
+    if (it != webgl_int_array_overrides_.end()) {
+      return it->second;
+    }
+    return std::nullopt;
+  }
+
+  // Returns spoofed extensions array if a profile is applied.
+  std::optional<std::vector<std::string>> GetWebGL1ExtensionsOverride() {
+    EnsureGpuProfileApplied();
+    if (!webgl1_extensions_override_.empty()) {
+      return webgl1_extensions_override_;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::vector<std::string>> GetWebGL2ExtensionsOverride() {
+    EnsureGpuProfileApplied();
+    if (!webgl2_extensions_override_.empty()) {
+      return webgl2_extensions_override_;
+    }
+    return std::nullopt;
+  }
 
   // Compute deterministic noise for a given double value.
   // Thread-safe: no shared mutable state. Same seed + same value = same noise.
@@ -115,24 +191,33 @@ class SessionNoiseCache {
     // Always load metadata flags (hardware-concurrency, device-memory, etc.)
     LoadMetadataFromCommandLine(command_line);
 
-    if (has_seeds_from_flags) {
-      return;
-    }
-
-    // Derive deterministic seeds from user-data-dir path hash
-    // Same profile path = same seeds across restarts
-    // Different profile = different seeds (different fingerprint)
+    // Always try to load fingerprint_config.json from user-data-dir
+    // This loads webgl_parameters overrides, seeds, and other metadata
     std::string user_data_dir;
     if (command_line->HasSwitch("user-data-dir")) {
       user_data_dir = command_line->GetSwitchValueASCII("user-data-dir");
     }
 
     if (!user_data_dir.empty()) {
-      GenerateSeedsFromPath(user_data_dir);
+      config_file_path_ = base::FilePath::FromUTF8Unsafe(user_data_dir)
+                              .Append(FILE_PATH_LITERAL("fingerprint_config.json"));
+      // Load config — this may override seeds, webgl params, vendor/renderer, etc.
+      bool loaded_from_file = LoadConfigFromFile();
+
+      if (has_seeds_from_flags) {
+        // CLI seeds take priority over file seeds
+      } else if (loaded_from_file) {
+        // File provided seeds
+      } else {
+        // Fallback: derive seeds from path hash
+        GenerateSeedsFromPath(user_data_dir);
+      }
     } else {
-      // No user-data-dir — truly random seeds
-      GenerateAllRandomSeeds();
+      // In renderer, we must only use explicitly passed seeds from the browser process via command line.
+      // If none are passed, they remain 0 (disabled). We do NOT randomly invent seeds here!
     }
+    // Auto-apply GPU profile based on webgl_renderer string (applies in both browser and renderer!)
+    ApplyGpuProfileIfNeeded();
   }
 
   bool LoadSeedsFromCommandLine(::base::CommandLine* command_line) {
@@ -194,21 +279,21 @@ class SessionNoiseCache {
       }
     }
 
-    // Fill missing seeds with random values if we have at least one
-    if (has_any_seed) {
-      if (session_seed_ == 0) session_seed_ = GenerateRandomSeed();
-      if (fonts_noise_seed_ == 0) fonts_noise_seed_ = GenerateRandomSeed();
-      if (audio_noise_seed_ == 0) audio_noise_seed_ = GenerateRandomSeed();
-      if (rects_noise_seed_ == 0) rects_noise_seed_ = GenerateRandomSeed();
-    }
+
 
     return has_any_seed;
   }
 
   void LoadMetadataFromCommandLine(::base::CommandLine* command_line) {
-    // WebGL overrides are already handled via existing flags:
-    // --webgl-vendor="..." --webgl-renderer="..."
-    // These are read directly where needed, not cached here
+    // WebGL vendor override: --webgl-vendor="Google Inc. (NVIDIA)"
+    if (command_line->HasSwitch("webgl-vendor")) {
+      webgl_vendor_ = command_line->GetSwitchValueASCII("webgl-vendor");
+    }
+
+    // WebGL renderer override: --webgl-renderer="ANGLE (NVIDIA, ...)"
+    if (command_line->HasSwitch("webgl-renderer")) {
+      webgl_renderer_ = command_line->GetSwitchValueASCII("webgl-renderer");
+    }
     
     // Hardware concurrency: --hardware-concurrency=8
     if (command_line->HasSwitch("hardware-concurrency")) {
@@ -308,28 +393,15 @@ class SessionNoiseCache {
       device_memory_ = *dm;
     }
 
-    // Fill missing seeds with random values and update file
+    // Load WebGL parameter overrides (for GPU fingerprint spoofing)
+    // Format: "webgl_parameters": { "3379": 32768, "34930": 16, ... }
+    // Keys are GL enum integer values as strings,
+    // values can be int, float, or arrays of int/float.
+    if (const base::Value::Dict* params_dict = dict.FindDict("webgl_parameters")) {
+      LoadWebGLParameterOverrides(*params_dict);
+    }
+
     if (has_any_seed) {
-      bool needs_save = false;
-      if (session_seed_ == 0) {
-        session_seed_ = GenerateRandomSeed();
-        needs_save = true;
-      }
-      if (fonts_noise_seed_ == 0) {
-        fonts_noise_seed_ = GenerateRandomSeed();
-        needs_save = true;
-      }
-      if (audio_noise_seed_ == 0) {
-        audio_noise_seed_ = GenerateRandomSeed();
-        needs_save = true;
-      }
-      if (rects_noise_seed_ == 0) {
-        rects_noise_seed_ = GenerateRandomSeed();
-        needs_save = true;
-      }
-      if (needs_save) {
-        SaveConfigToFile();
-      }
       return true;
     }
 
@@ -391,6 +463,56 @@ class SessionNoiseCache {
     return base::RandUint64();
   }
 
+  // Auto-apply built-in GPU profile based on webgl_renderer_ string.
+  // Profile values are used as a baseline; explicit JSON webgl_parameters
+  // or values already loaded take priority (won't be overwritten).
+  // This means: Manager app just sets webgl_renderer, browser fills the rest.
+  void ApplyGpuProfileIfNeeded() {
+    if (webgl_renderer_.empty()) {
+      return;  // No renderer set, nothing to match
+    }
+
+    const WebGLGpuProfile* profile = FindGpuProfile(webgl_renderer_);
+    if (!profile) {
+      return;  // No matching profile found
+    }
+
+    // D3D11 same-backend check: skip parameter/extension overrides.
+    // WARP (Microsoft Basic Render Driver) with --ignore-gpu-blocklist
+    // returns IDENTICAL D3D11 Feature Level 11.0 capabilities as real GPUs.
+    // Overriding them causes CreepJS capability hash mismatches because
+    // our profile values may differ subtly from the actual D3D11 implementation.
+    // WebGL noise is handled separately (currently disabled to prevent
+    // BrowserScan cross-path detection).
+    bool same_backend = webgl_renderer_.find("D3D11") != std::string::npos;
+
+    if (!same_backend) {
+      // Cross-backend spoofing: apply all parameter overrides
+      for (const auto& [pname, value] : profile->int_params) {
+        if (webgl_int_overrides_.find(pname) == webgl_int_overrides_.end()) {
+          webgl_int_overrides_[pname] = value;
+        }
+      }
+      for (const auto& [pname, value] : profile->float_array_params) {
+        if (webgl_float_array_overrides_.find(pname) == webgl_float_array_overrides_.end()) {
+          webgl_float_array_overrides_[pname] = value;
+        }
+      }
+      for (const auto& [pname, value] : profile->int_array_params) {
+        if (webgl_int_array_overrides_.find(pname) == webgl_int_array_overrides_.end()) {
+          webgl_int_array_overrides_[pname] = value;
+        }
+      }
+      if (webgl1_extensions_override_.empty()) {
+        webgl1_extensions_override_ = profile->webgl1_extensions;
+      }
+      if (webgl2_extensions_override_.empty()) {
+        webgl2_extensions_override_ = profile->webgl2_extensions;
+      }
+    }
+    // D3D11 same-backend: real GPU values pass through (identical to profile)
+  }
+
   // Hash function that combines session seed with value
   uint64_t HashValue(double value) const {
     uint64_t v = base::bit_cast<uint64_t>(value);
@@ -408,6 +530,54 @@ class SessionNoiseCache {
            (min_v * 0x7f4a7c15) ^ (max_v * 0x4a7c157f);
   }
 
+  // Parse a JSON dict of WebGL parameter overrides into typed maps.
+  void LoadWebGLParameterOverrides(const base::Value::Dict& params_dict) {
+    for (auto [key_str, val] : params_dict) {
+      unsigned int pname = 0;
+      if (!base::StringToUint(key_str, &pname)) {
+        continue;  // Skip keys that aren't valid uint GL enum values
+      }
+
+      if (val.is_int()) {
+        webgl_int_overrides_[pname] = val.GetInt();
+      } else if (val.is_double()) {
+        webgl_float_overrides_[pname] = static_cast<float>(val.GetDouble());
+      } else if (val.is_list()) {
+        const base::Value::List& arr = val.GetList();
+        bool all_int = true;
+        bool all_numeric = true;
+        for (const auto& elem : arr) {
+          if (!elem.is_int() && !elem.is_double()) {
+            all_numeric = false;
+            break;
+          }
+          if (!elem.is_int()) {
+            all_int = false;
+          }
+        }
+        if (!all_numeric || arr.empty()) continue;
+
+        if (all_int) {
+          std::vector<int> int_arr;
+          int_arr.reserve(arr.size());
+          for (const auto& elem : arr) {
+            int_arr.push_back(elem.GetInt());
+          }
+          webgl_int_array_overrides_[pname] = std::move(int_arr);
+        } else {
+          std::vector<float> float_arr;
+          float_arr.reserve(arr.size());
+          for (const auto& elem : arr) {
+            float_arr.push_back(
+                static_cast<float>(elem.is_int() ? elem.GetInt()
+                                                 : elem.GetDouble()));
+          }
+          webgl_float_array_overrides_[pname] = std::move(float_arr);
+        }
+      }
+    }
+  }
+
   uint64_t session_seed_;       // Canvas noise seed
   uint64_t fonts_noise_seed_;   // Fonts noise seed
   uint64_t audio_noise_seed_;   // Audio noise seed
@@ -419,6 +589,20 @@ class SessionNoiseCache {
   std::string user_agent_;      // User-Agent override
   int hardware_concurrency_;    // navigator.hardwareConcurrency override
   int device_memory_;           // navigator.deviceMemory override
+
+  // WebGL parameter override maps (keyed by GLenum integer value)
+  std::map<unsigned int, int> webgl_int_overrides_
+      ALLOW_DISCOURAGED_TYPE("Loaded once at init from JSON; no blink HashMap needed");
+  std::map<unsigned int, float> webgl_float_overrides_
+      ALLOW_DISCOURAGED_TYPE("Loaded once at init from JSON; no blink HashMap needed");
+  std::map<unsigned int, std::vector<float>> webgl_float_array_overrides_
+      ALLOW_DISCOURAGED_TYPE("Loaded once at init from JSON; no blink HashMap needed");
+  std::map<unsigned int, std::vector<int>> webgl_int_array_overrides_
+      ALLOW_DISCOURAGED_TYPE("Loaded once at init from JSON; no blink HashMap needed");
+  std::vector<std::string> webgl1_extensions_override_
+      ALLOW_DISCOURAGED_TYPE("Loaded once at init from JSON; no blink HashMap needed");
+  std::vector<std::string> webgl2_extensions_override_
+      ALLOW_DISCOURAGED_TYPE("Loaded once at init from JSON; no blink HashMap needed");
   
   base::FilePath config_file_path_;
 };

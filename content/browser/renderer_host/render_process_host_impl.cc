@@ -3576,6 +3576,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
     "canvas-vendor",
     "canvas-noise",
     "canvas-seed",
+    "webgl-noise",
     "audio-noise",
     "rects-noise",
     "fonts-noise",

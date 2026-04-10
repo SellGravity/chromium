@@ -35,15 +35,21 @@ class UnicodeGlyphsNoiseGenerator {
     return *instance;
   }
 
+  // Thread-local flag to suppress font noise for specific rendering contexts (e.g., Canvas)
+  static bool& SuppressNoiseFlag() {
+    thread_local bool suppress_noise = false;
+    return suppress_noise;
+  }
+
   // Check if Unicode Glyphs noise is enabled via --fonts-noise flag
-  bool IsEnabled() const { return noise_enabled_; }
+  bool IsEnabled() const { return noise_enabled_ && !SuppressNoiseFlag(); }
 
   // Get noise for glyph advance width (in pixels)
   // Returns value + noise, where noise is in range [-0.02, 0.02] pixels
   // This is invisible per-glyph but accumulates over ~50 chars to ±1px
   // which is enough to change integer-based fingerprints (offsetWidth)
   float GetNoisedWidth(float original_width, Glyph glyph) {
-    if (!noise_enabled_) {
+    if (!IsEnabled()) {
       return original_width;
     }
     return original_width + GetWidthNoise(original_width, glyph);
@@ -52,7 +58,7 @@ class UnicodeGlyphsNoiseGenerator {
   // Get noise for glyph bounds/extents (in pixels)
   // Returns value + noise, where noise is in range [-0.03, 0.03] pixels
   float GetNoisedBounds(float original_bounds, Glyph glyph, int coord_index) {
-    if (!noise_enabled_) {
+    if (!IsEnabled()) {
       return original_bounds;
     }
     return original_bounds + GetBoundsNoise(original_bounds, glyph, coord_index);
@@ -72,9 +78,9 @@ class UnicodeGlyphsNoiseGenerator {
   friend class base::NoDestructor<UnicodeGlyphsNoiseGenerator>;
 
   UnicodeGlyphsNoiseGenerator() {
-    // Check if --fonts-noise flag is enabled
+    // Check if --fonts-noise flag is enabled (via its passed seed)
     base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-    if (!command_line || !command_line->HasSwitch("fonts-noise")) {
+    if (!command_line || !command_line->HasSwitch("unicode-glyphs-seed")) {
       noise_enabled_ = false;
       session_seed_ = 0;
       return;
