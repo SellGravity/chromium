@@ -669,53 +669,155 @@ std::string GetPlatformForUAMetadata() {
 blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
   blink::UserAgentMetadata metadata;
 
-  // Low entropy client hints.
-  metadata.brand_version_list =
-      GetUserAgentBrandMajorVersionListInternal(std::nullopt);
+  // ═══ CHECK FOR CUSTOM USER-AGENT OVERRIDE ═══
+  base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+  std::string custom_ua;
+  bool has_custom_ua = false;
+
+  if (cmd && cmd->HasSwitch(kUserAgent)) {
+    custom_ua = cmd->GetSwitchValueASCII(kUserAgent);
+    if (net::HttpUtil::IsValidHeaderValue(custom_ua)) {
+      has_custom_ua = true;
+    }
+  }
+
+  // ═══ PARSE CHROME VERSION FROM UA STRING ═══
+  // Extract "Chrome/143.0.6917.0" → major="143", full="143.0.6917.0"
+  std::string parsed_major_version;
+  std::string parsed_full_version;
+
+  if (has_custom_ua) {
+    size_t chrome_pos = custom_ua.find("Chrome/");
+    if (chrome_pos != std::string::npos) {
+      std::string version_part = custom_ua.substr(chrome_pos + 7);
+      size_t end_pos = version_part.find(' ');
+      parsed_full_version = (end_pos != std::string::npos)
+                                ? version_part.substr(0, end_pos)
+                                : version_part;
+      size_t dot_pos = parsed_full_version.find('.');
+      parsed_major_version = (dot_pos != std::string::npos)
+                                 ? parsed_full_version.substr(0, dot_pos)
+                                 : parsed_full_version;
+    }
+  }
+
+  // ═══ LOW ENTROPY CLIENT HINTS ═══
+
+  // brands (e.g., "Chromium 143", "Google Chrome 143", "Not.A/Brand 24")
+  if (has_custom_ua && !parsed_major_version.empty()) {
+    int major_ver_int;
+    base::StringToInt(parsed_major_version, &major_ver_int);
+    // Force "Google Chrome" brand regardless of build branding
+    // Real Chrome always includes this; Chromium builds don't by default
+    metadata.brand_version_list = GenerateBrandVersionList(
+        major_ver_int, "Google Chrome", parsed_major_version,
+        blink::UserAgentBrandVersionType::kMajorVersion, std::nullopt);
+  } else {
+    metadata.brand_version_list =
+        GetUserAgentBrandMajorVersionListInternal(std::nullopt);
+  }
+
   metadata.mobile = GetMobileBitForUAMetadata();
-  metadata.platform = GetPlatformForUAMetadata();
+
+  // platform (e.g., "Windows", "macOS", "Linux")
+  if (has_custom_ua) {
+    if (custom_ua.find("Windows NT") != std::string::npos) {
+      metadata.platform = "Windows";
+    } else if (custom_ua.find("Macintosh") != std::string::npos) {
+      metadata.platform = "macOS";
+    } else if (custom_ua.find("Android") != std::string::npos) {
+      metadata.platform = "Android";
+    } else if (custom_ua.find("CrOS") != std::string::npos) {
+      metadata.platform = "Chrome OS";
+    } else if (custom_ua.find("Linux") != std::string::npos) {
+      metadata.platform = "Linux";
+    } else {
+      metadata.platform = GetPlatformForUAMetadata();
+    }
+  } else {
+    metadata.platform = GetPlatformForUAMetadata();
+  }
 
   if (only_low_entropy_ch) {
     return metadata;
   }
 
-  // High entropy client hints — always populate regardless of --user-agent.
-  metadata.brand_full_version_list =
-      GetUserAgentBrandFullVersionListInternal(std::nullopt);
-  metadata.full_version = std::string(version_info::GetVersionNumber());
-  metadata.architecture = GetCpuArchitecture();
+  // ═══ HIGH ENTROPY CLIENT HINTS ═══
+
+  // brand_full_version_list + full_version
+  if (has_custom_ua && !parsed_full_version.empty()) {
+    int major_ver_int;
+    base::StringToInt(parsed_major_version, &major_ver_int);
+    metadata.brand_full_version_list = GenerateBrandVersionList(
+        major_ver_int, "Google Chrome", parsed_full_version,
+        blink::UserAgentBrandVersionType::kFullVersion, std::nullopt);
+    metadata.full_version = parsed_full_version;
+  } else {
+    metadata.brand_full_version_list =
+        GetUserAgentBrandFullVersionListInternal(std::nullopt);
+    metadata.full_version = std::string(version_info::GetVersionNumber());
+  }
+
+  // architecture, bitness, wow64
+  if (has_custom_ua) {
+    if (custom_ua.find("WOW64") != std::string::npos) {
+      metadata.architecture = "x86";
+      metadata.bitness = "64";
+      metadata.wow64 = true;
+    } else if (custom_ua.find("Win64; x64") != std::string::npos ||
+               custom_ua.find("x86_64") != std::string::npos) {
+      metadata.architecture = "x86";
+      metadata.bitness = "64";
+      metadata.wow64 = false;
+    } else if (custom_ua.find("ARM64") != std::string::npos ||
+               custom_ua.find("aarch64") != std::string::npos) {
+      metadata.architecture = "arm";
+      metadata.bitness = "64";
+      metadata.wow64 = false;
+    } else if (custom_ua.find("Windows NT") != std::string::npos) {
+      // Windows without specific arch → default x86/64
+      metadata.architecture = "x86";
+      metadata.bitness = "64";
+      metadata.wow64 = false;
+    } else if (custom_ua.find("Macintosh") != std::string::npos) {
+      metadata.architecture = "x86";
+      metadata.bitness = "64";
+      metadata.wow64 = false;
+    } else {
+      metadata.architecture = GetCpuArchitecture();
+      metadata.bitness = GetCpuBitness();
+      metadata.wow64 = IsWoW64();
+    }
+  } else {
+    metadata.architecture = GetCpuArchitecture();
+    metadata.bitness = GetCpuBitness();
+    metadata.wow64 = IsWoW64();
+  }
+
   metadata.model = BuildModelInfo();
   metadata.form_factors = GetFormFactorsClientHint(metadata, metadata.mobile);
-  metadata.bitness = GetCpuBitness();
-  metadata.wow64 = IsWoW64();
-  metadata.platform_version = GetPlatformVersion();
 
-  // Anti-fingerprint: override platform_version to match --user-agent
-  // Without this, BrowserScan detects real OS via Client Hints even when
-  // --user-agent says Windows 10 but actual OS is Windows 11.
-  base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-  if (cmd && cmd->HasSwitch("user-agent")) {
-    std::string ua = cmd->GetSwitchValueASCII("user-agent");
-    // Parse "Windows NT X.Y" from the UA string
-    size_t nt_pos = ua.find("Windows NT ");
+  // platform_version
+  if (has_custom_ua) {
+    size_t nt_pos = custom_ua.find("Windows NT ");
     if (nt_pos != std::string::npos) {
-      std::string nt_ver = ua.substr(nt_pos + 11, 4);  // e.g. "10.0" or "6.1"
+      std::string nt_ver = custom_ua.substr(nt_pos + 11, 4);
       if (nt_ver.find("10.0") == 0) {
-        // Could be Win10 or Win11 — check for WOW64 hint
-        // Win10 UA often has "WOW64", Win11 uses "Win64; x64"
-        if (ua.find("WOW64") != std::string::npos) {
-          metadata.platform_version = "10.0.0";  // Windows 10 (32-bit mode)
-        } else {
-          metadata.platform_version = "10.0.0";  // Default to Win10
-        }
+        metadata.platform_version = "10.0.0";
       } else if (nt_ver.find("6.3") == 0) {
-        metadata.platform_version = "6.3.0";   // Windows 8.1
+        metadata.platform_version = "6.3.0";
       } else if (nt_ver.find("6.2") == 0) {
-        metadata.platform_version = "6.2.0";   // Windows 8
+        metadata.platform_version = "6.2.0";
       } else if (nt_ver.find("6.1") == 0) {
-        metadata.platform_version = "3.0.0";   // Windows 7
+        metadata.platform_version = "3.0.0";
+      } else {
+        metadata.platform_version = GetPlatformVersion();
       }
+    } else {
+      metadata.platform_version = GetPlatformVersion();
     }
+  } else {
+    metadata.platform_version = GetPlatformVersion();
   }
 
   return metadata;

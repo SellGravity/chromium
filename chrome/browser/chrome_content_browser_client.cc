@@ -26,6 +26,7 @@
 #include "base/dcheck_is_on.h"
 #include "base/feature_list.h"
 #include "base/files/file_path.h"
+#include "base/hash/hash.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
@@ -2745,54 +2746,46 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
           Profile::FromBrowserContext(process->GetBrowserContext());
       PrefService* prefs = profile->GetPrefs();
 
-      // Fingerprinting protection: Canvas noise seed persistence
+      // ═══ FINGERPRINT SEED GENERATION (ZERO I/O) ═══
+      // Seeds are derived deterministically from profile path hash.
+      // Same profile path = same seeds = consistent fingerprint.
+      // NO prefs read/write, NO SQLite, NO file I/O on UI thread.
+      // This fixes the browser hang caused by NtWriteFile blocking UI thread.
+      
+      // Helper: derive uint64 seed from profile path + salt string
+      auto DeriveProfileSeed = [&](const std::string& salt) -> uint64_t {
+        std::string profile_path = process->GetBrowserContext()
+                                       ->GetPath()
+                                       .AsUTF8Unsafe();
+        uint32_t hi = base::PersistentHash(profile_path + ":" + salt + ":hi");
+        uint32_t lo = base::PersistentHash(profile_path + ":" + salt + ":lo");
+        return (static_cast<uint64_t>(hi) << 32) | lo;
+      };
+
+      // Canvas noise seed
       if (browser_command_line.HasSwitch("canvas-noise")) {
-        uint64_t canvas_seed = prefs->GetUint64(prefs::kCanvasNoiseSeed);
-        if (canvas_seed == 0) {
-          // Generate new seed and save to profile
-          canvas_seed = base::RandUint64();
-          prefs->SetUint64(prefs::kCanvasNoiseSeed, canvas_seed);
-        }
-        // Pass seed to renderer
+        uint64_t canvas_seed = DeriveProfileSeed("canvas");
         command_line->AppendSwitchASCII("canvas-seed",
                                         base::NumberToString(canvas_seed));
       }
 
-      // Fingerprinting protection: Fonts/Unicode Glyphs noise seed persistence
+      // Fonts/Unicode Glyphs noise seed
       if (browser_command_line.HasSwitch("fonts-noise")) {
-        uint64_t glyphs_seed = prefs->GetUint64(prefs::kUnicodeGlyphsNoiseSeed);
-        if (glyphs_seed == 0) {
-          // Generate new seed and save to profile
-          glyphs_seed = base::RandUint64();
-          prefs->SetUint64(prefs::kUnicodeGlyphsNoiseSeed, glyphs_seed);
-        }
-        // Pass seed to renderer
+        uint64_t glyphs_seed = DeriveProfileSeed("glyphs");
         command_line->AppendSwitchASCII("unicode-glyphs-seed",
                                         base::NumberToString(glyphs_seed));
       }
 
-      // Fingerprinting protection: Audio noise seed persistence
+      // Audio noise seed
       if (browser_command_line.HasSwitch("audio-noise")) {
-        uint64_t audio_seed = prefs->GetUint64(prefs::kAudioNoiseSeed);
-        if (audio_seed == 0) {
-          // Generate new seed and save to profile
-          audio_seed = base::RandUint64();
-          prefs->SetUint64(prefs::kAudioNoiseSeed, audio_seed);
-        }
-        // Pass seed to renderer
+        uint64_t audio_seed = DeriveProfileSeed("audio");
         command_line->AppendSwitchASCII("audio-noise-seed",
                                         base::NumberToString(audio_seed));
       }
 
-      // Fingerprinting protection: ClientRects noise seed persistence
+      // ClientRects noise seed
       if (browser_command_line.HasSwitch("rects-noise")) {
-        uint64_t rects_seed = prefs->GetUint64(prefs::kRectsNoiseSeed);
-        if (rects_seed == 0) {
-          // Generate new seed and save to profile
-          rects_seed = base::RandUint64();
-          prefs->SetUint64(prefs::kRectsNoiseSeed, rects_seed);
-        }
-        // Pass seed to renderer
+        uint64_t rects_seed = DeriveProfileSeed("rects");
         command_line->AppendSwitchASCII("rects-noise-seed",
                                         base::NumberToString(rects_seed));
       }
@@ -2811,13 +2804,9 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
             browser_command_line.GetSwitchValueASCII("viewport-override"));
       }
 
-      // Fingerprinting protection: Font substitution mapping
+      // Fingerprinting protection: Font substitution mapping (deterministic)
       if (browser_command_line.HasSwitch("fonts-noise")) {
-        std::string mapping_str = prefs->GetString(prefs::kFontSubstitutionMapping);
-
-        if (mapping_str.empty()) {
-          // Generate new font substitution mapping
-          // List of common fonts to choose from
+          // Generate deterministic font substitution from profile path hash
           static const char* kFontPool[] = {
               "arial", "times new roman", "courier new", "verdana",
               "georgia", "tahoma", "trebuchet ms", "comic sans ms",
@@ -2832,14 +2821,13 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
           };
           const size_t kFontPoolSize = std::size(kFontPool);
 
-          // Use base::RandUint64() instead of std::random_device
-          // std::random_device calls CryptGenRandom on Windows which can
-          // BLOCK the UI thread when entropy pool is exhausted (multiple profiles)
-          std::mt19937 gen(static_cast<uint32_t>(base::RandUint64()));
+          // Deterministic seed from profile path — same profile = same mapping
+          uint64_t font_seed = DeriveProfileSeed("font-sub");
+          std::mt19937 gen(static_cast<uint32_t>(font_seed));
           std::uniform_int_distribution<int> num_dis(1, 9);
           int num_substitutions = num_dis(gen);
 
-          // Shuffle font pool
+          // Shuffle font pool deterministically
           std::vector<size_t> indices;
           for (size_t i = 0; i < kFontPoolSize; ++i) {
             indices.push_back(i);
@@ -2847,7 +2835,6 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
           std::shuffle(indices.begin(), indices.end(), gen);
 
           // Create mappings: source -> target
-          // Format: "source1:target1,source2:target2,..."
           std::vector<std::string> mappings;
           for (int i = 0; i < num_substitutions && i * 2 + 1 < static_cast<int>(kFontPoolSize); ++i) {
             size_t src_idx = indices[i * 2];
@@ -2857,14 +2844,12 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
             mappings.push_back(source + ":" + target);
           }
 
-          mapping_str = base::JoinString(mappings, ",");
-          prefs->SetString(prefs::kFontSubstitutionMapping, mapping_str);
-        }
+          std::string mapping_str = base::JoinString(mappings, ",");
+          // NO prefs->SetString() — zero I/O!
 
-        // Pass mapping to renderer
-        if (!mapping_str.empty()) {
-          command_line->AppendSwitchASCII("font-substitution-map", mapping_str);
-        }
+          if (!mapping_str.empty()) {
+            command_line->AppendSwitchASCII("font-substitution-map", mapping_str);
+          }
       }
 
       // Currently this pref is only registered if applied via a policy.

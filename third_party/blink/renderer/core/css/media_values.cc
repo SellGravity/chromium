@@ -30,6 +30,8 @@
 #include "third_party/blink/renderer/platform/widget/frame_widget.h"
 #include "ui/base/mojom/window_show_state.mojom-blink.h"
 #include "ui/display/screen_info.h"
+#include "base/command_line.h"
+#include "base/strings/string_number_conversions.h"
 
 namespace blink {
 
@@ -193,6 +195,17 @@ bool MediaValues::CalculateStrictMode(LocalFrame* frame) {
 }
 
 float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
+  // If dpr-override is set (by --window-scale), return overridden DPR.
+  // This ensures CSS matchMedia('(resolution: Xdppx)') is consistent
+  // with window.devicePixelRatio, preventing fingerprint detection.
+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+  if (cmd->HasSwitch("dpr-override")) {
+    double dpr_val;
+    if (base::StringToDouble(cmd->GetSwitchValueASCII("dpr-override"),
+                             &dpr_val) && dpr_val > 0) {
+      return static_cast<float>(dpr_val);
+    }
+  }
   return frame->DevicePixelRatio();
 }
 
