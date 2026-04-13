@@ -1355,7 +1355,7 @@ void MediaDevices::DevicesEnumerated(
 
   if (cmd->HasSwitch("media-device-count")) {
     std::string val = cmd->GetSwitchValueASCII("media-device-count");
-    int counts[3] = {1, 1, 1};  // default: 1 audio_in, 1 audio_out, 1 video_in
+    std::array<int, 3> counts = {1, 1, 1};  // default: 1 audio_in, 1 audio_out, 1 video_in
     // Parse "A,B,C"
     size_t pos1 = val.find(',');
     if (pos1 != std::string::npos) {
@@ -1373,12 +1373,13 @@ void MediaDevices::DevicesEnumerated(
 
     // Index mapping: 0=kMediaAudioInput, 1=kMediaVideoInput, 2=kMediaAudioOutput
     // Flag format:   counts[0]=audio_in,  counts[1]=audio_out,  counts[2]=video_in
-    int device_counts[3];
-    device_counts[0] = counts[0];  // kMediaAudioInput  ← audio_in
-    device_counts[1] = counts[2];  // kMediaVideoInput  ← video_in
-    device_counts[2] = counts[1];  // kMediaAudioOutput ← audio_out
+    std::array<int, 3> device_counts = {
+      counts[0],  // kMediaAudioInput  ← audio_in
+      counts[2],  // kMediaVideoInput  ← video_in
+      counts[1],  // kMediaAudioOutput ← audio_out
+    };
 
-    const char* labels[3] = {"Microphone", "Camera", "Speaker"};
+    const std::array<const char*, 3> labels = {"Microphone", "Camera", "Speaker"};
     spoofed_enumeration.resize(3);
     for (int i = 0; i < 3; i++) {
       for (int j = 0; j < device_counts[i]; j++) {

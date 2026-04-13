@@ -285,7 +285,7 @@ ScopedRGBEmulationColorMask::ScopedRGBEmulationColorMask(
       requires_emulation_(drawing_buffer->RequiresAlphaChannelToBePreserved()) {
   if (requires_emulation_) {
     context_->active_scoped_rgb_emulation_color_masks_++;
-    UNSAFE_TODO(memcpy(color_mask_.data(), color_mask, 4 * sizeof(GLboolean)));
+    base::span(color_mask_).copy_from(base::span(color_mask, 4u));
     context_->ContextGL()->ColorMask(color_mask_[0], color_mask_[1],
                                      color_mask_[2], false);
   }
@@ -1966,6 +1966,8 @@ WebGLRenderingContextBase::PaintRenderingResultsToSnapshot(
           int bpp = bitmap.bytesPerPixel();
 
           if (bpp >= 4 && width > 0 && height > 0) {
+            size_t total_bytes = static_cast<size_t>(width * height) * bpp;
+            auto pixel_span = base::span<uint8_t>(pixels, total_bytes);
             for (int i = 0; i < width * height; i++) {
               uint32_t val = static_cast<uint32_t>(
                   seed ^ (i * 31) ^ ((i % width) * 11) ^ ((i / width) * 17));
@@ -1974,11 +1976,11 @@ WebGLRenderingContextBase::PaintRenderingResultsToSnapshot(
 
               if (val % 20 == 0) {  // ~5% of pixels
                 size_t offset = i * bpp;
-                if (pixels[offset + 3] > 0) {
+                if (pixel_span[offset + 3] > 0) {
                   int channel = val % 3;
                   int direction = ((val >> 4) & 1) ? 1 : -1;
-                  int current = pixels[offset + channel];
-                  pixels[offset + channel] = static_cast<uint8_t>(
+                  int current = pixel_span[offset + channel];
+                  pixel_span[offset + channel] = static_cast<uint8_t>(
                       std::clamp(current + direction, 0, 255));
                 }
               }

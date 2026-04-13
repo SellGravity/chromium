@@ -68,7 +68,14 @@ if (Test-Path "$SOURCE\icudtl.dat") {
 # Copy main locales only
 Write-Host "[6/8] Copying locales (optimized)..." -ForegroundColor Cyan
 if (Test-Path "$SOURCE\locales") {
-    $mainLocales = @("en-US.pak", "vi.pak", "en-GB.pak", "fr.pak", "de.pak", "es.pak", "ja.pak", "zh-CN.pak")
+    $mainLocales = @(
+        # Tiếng Anh & Tiếng Việt (Cơ bản)
+        "en-US.pak", "en-GB.pak", "vi.pak", 
+        # Châu Âu & Châu Mỹ
+        "fr.pak", "de.pak", "es.pak", "it.pak", "ru.pak", "pt-BR.pak", "pt-PT.pak", "nl.pak", "pl.pak", "tr.pak",
+        # Châu Á & Các ngôn ngữ phổ biến khác
+        "ja.pak", "zh-CN.pak", "zh-TW.pak", "ko.pak", "ar.pak", "hi.pak", "id.pak", "th.pak"
+    )
     
     New-Item -ItemType Directory -Path "$DEST\locales" -Force | Out-Null
     

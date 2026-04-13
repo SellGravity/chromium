@@ -2797,6 +2797,20 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
                                         base::NumberToString(rects_seed));
       }
 
+      // Window scale: propagate DPR override to renderer
+      if (browser_command_line.HasSwitch("dpr-override")) {
+        command_line->AppendSwitchASCII(
+            "dpr-override",
+            browser_command_line.GetSwitchValueASCII("dpr-override"));
+      }
+
+      // Window scale: propagate viewport override to renderer
+      if (browser_command_line.HasSwitch("viewport-override")) {
+        command_line->AppendSwitchASCII(
+            "viewport-override",
+            browser_command_line.GetSwitchValueASCII("viewport-override"));
+      }
+
       // Fingerprinting protection: Font substitution mapping
       if (browser_command_line.HasSwitch("fonts-noise")) {
         std::string mapping_str = prefs->GetString(prefs::kFontSubstitutionMapping);
@@ -2818,9 +2832,10 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
           };
           const size_t kFontPoolSize = std::size(kFontPool);
 
-          // Randomly choose 1-9 fonts to substitute
-          std::random_device rd;
-          std::mt19937 gen(rd());
+          // Use base::RandUint64() instead of std::random_device
+          // std::random_device calls CryptGenRandom on Windows which can
+          // BLOCK the UI thread when entropy pool is exhausted (multiple profiles)
+          std::mt19937 gen(static_cast<uint32_t>(base::RandUint64()));
           std::uniform_int_distribution<int> num_dis(1, 9);
           int num_substitutions = num_dis(gen);
 
@@ -2835,8 +2850,10 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
           // Format: "source1:target1,source2:target2,..."
           std::vector<std::string> mappings;
           for (int i = 0; i < num_substitutions && i * 2 + 1 < static_cast<int>(kFontPoolSize); ++i) {
-            std::string source = kFontPool[indices[i * 2]];
-            std::string target = kFontPool[indices[i * 2 + 1]];
+            size_t src_idx = indices[i * 2];
+            size_t tgt_idx = indices[i * 2 + 1];
+            std::string source = base::span(kFontPool)[src_idx];
+            std::string target = base::span(kFontPool)[tgt_idx];
             mappings.push_back(source + ":" + target);
           }
 

@@ -689,6 +689,35 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
   metadata.bitness = GetCpuBitness();
   metadata.wow64 = IsWoW64();
   metadata.platform_version = GetPlatformVersion();
+
+  // Anti-fingerprint: override platform_version to match --user-agent
+  // Without this, BrowserScan detects real OS via Client Hints even when
+  // --user-agent says Windows 10 but actual OS is Windows 11.
+  base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+  if (cmd && cmd->HasSwitch("user-agent")) {
+    std::string ua = cmd->GetSwitchValueASCII("user-agent");
+    // Parse "Windows NT X.Y" from the UA string
+    size_t nt_pos = ua.find("Windows NT ");
+    if (nt_pos != std::string::npos) {
+      std::string nt_ver = ua.substr(nt_pos + 11, 4);  // e.g. "10.0" or "6.1"
+      if (nt_ver.find("10.0") == 0) {
+        // Could be Win10 or Win11 — check for WOW64 hint
+        // Win10 UA often has "WOW64", Win11 uses "Win64; x64"
+        if (ua.find("WOW64") != std::string::npos) {
+          metadata.platform_version = "10.0.0";  // Windows 10 (32-bit mode)
+        } else {
+          metadata.platform_version = "10.0.0";  // Default to Win10
+        }
+      } else if (nt_ver.find("6.3") == 0) {
+        metadata.platform_version = "6.3.0";   // Windows 8.1
+      } else if (nt_ver.find("6.2") == 0) {
+        metadata.platform_version = "6.2.0";   // Windows 8
+      } else if (nt_ver.find("6.1") == 0) {
+        metadata.platform_version = "3.0.0";   // Windows 7
+      }
+    }
+  }
+
   return metadata;
 }
 

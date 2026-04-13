@@ -32,6 +32,7 @@
 
 #include "base/command_line.h"
 #include "base/containers/contains.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/trace_id_helper.h"
@@ -1607,6 +1608,27 @@ int LocalDOMWindow::outerHeight() const {
     return innerHeight();
   }
 
+  // Anti-fingerprint: when --window-scale is used, outerHeight returns
+  // the DIP-compensated value (e.g., 4320 for 1080 at scale=25%).
+  // Override to return original intended size to prevent detection.
+  static const int kCachedOuterH = []() -> int {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("viewport-override")) {
+      std::string vp = cmd->GetSwitchValueASCII("viewport-override");
+      size_t comma = vp.find(',');
+      if (comma != std::string::npos) {
+        int h = 0;
+        if (base::StringToInt(vp.substr(comma + 1), &h) && h > 0) {
+          return h;
+        }
+      }
+    }
+    return 0;
+  }();
+
+  if (kCachedOuterH > 0)
+    return kCachedOuterH;
+
   Page* page = frame->GetPage();
   if (!page)
     return 0;
@@ -1631,6 +1653,27 @@ int LocalDOMWindow::outerWidth() const {
   if (frame->IsInFencedFrameTree()) {
     return innerWidth();
   }
+
+  // Anti-fingerprint: when --window-scale is used, outerWidth returns
+  // the DIP-compensated value (e.g., 7680 for 1920 at scale=25%).
+  // Override to return original intended size to prevent detection.
+  static const int kCachedOuterW = []() -> int {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("viewport-override")) {
+      std::string vp = cmd->GetSwitchValueASCII("viewport-override");
+      size_t comma = vp.find(',');
+      if (comma != std::string::npos) {
+        int w = 0;
+        if (base::StringToInt(vp.substr(0, comma), &w) && w > 0) {
+          return w;
+        }
+      }
+    }
+    return 0;
+  }();
+
+  if (kCachedOuterW > 0)
+    return kCachedOuterW;
 
   Page* page = frame->GetPage();
   if (!page)
@@ -1680,6 +1723,26 @@ int LocalDOMWindow::innerHeight() const {
   if (!GetFrame())
     return 0;
 
+  // Anti-fingerprint: when --window-scale is used, return original viewport.
+  // Cache parsed values to avoid per-call string parsing (called 1000s/sec).
+  static const int kCachedHeight = []() -> int {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("viewport-override")) {
+      std::string vp = cmd->GetSwitchValueASCII("viewport-override");
+      size_t comma = vp.find(',');
+      if (comma != std::string::npos) {
+        int h = 0;
+        if (base::StringToInt(vp.substr(comma + 1), &h) && h > 0) {
+          return std::max(h - 75, 100);
+        }
+      }
+    }
+    return 0;  // 0 = no override
+  }();
+
+  if (kCachedHeight > 0)
+    return kCachedHeight;
+
   return AdjustForAbsoluteZoom::AdjustInt(GetViewportSize().height(),
                                           GetFrame()->LayoutZoomFactor());
 }
@@ -1687,6 +1750,26 @@ int LocalDOMWindow::innerHeight() const {
 int LocalDOMWindow::innerWidth() const {
   if (!GetFrame())
     return 0;
+
+  // Anti-fingerprint: when --window-scale is used, return original viewport.
+  // Cache parsed values to avoid per-call string parsing (called 1000s/sec).
+  static const int kCachedWidth = []() -> int {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("viewport-override")) {
+      std::string vp = cmd->GetSwitchValueASCII("viewport-override");
+      size_t comma = vp.find(',');
+      if (comma != std::string::npos) {
+        int w = 0;
+        if (base::StringToInt(vp.substr(0, comma), &w) && w > 0) {
+          return w;
+        }
+      }
+    }
+    return 0;  // 0 = no override
+  }();
+
+  if (kCachedWidth > 0)
+    return kCachedWidth;
 
   return AdjustForAbsoluteZoom::AdjustInt(GetViewportSize().width(),
                                           GetFrame()->LayoutZoomFactor());
@@ -1826,6 +1909,23 @@ CSSStyleDeclaration* LocalDOMWindow::getComputedStyle(
 double LocalDOMWindow::devicePixelRatio() const {
   if (!GetFrame())
     return 0.0;
+
+  // Anti-fingerprint: when --window-scale is used, return overridden DPR.
+  // Cache parsed value to avoid per-call string parsing (hot path).
+  static const double kCachedDpr = []() -> double {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    if (cmd && cmd->HasSwitch("dpr-override")) {
+      std::string dpr_str = cmd->GetSwitchValueASCII("dpr-override");
+      double dpr = 0.0;
+      if (base::StringToDouble(dpr_str, &dpr) && dpr > 0.0) {
+        return dpr;
+      }
+    }
+    return 0.0;  // 0.0 = no override
+  }();
+
+  if (kCachedDpr > 0.0)
+    return kCachedDpr;
 
   return GetFrame()->DevicePixelRatio();
 }

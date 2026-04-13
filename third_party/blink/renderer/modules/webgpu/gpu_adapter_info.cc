@@ -124,12 +124,12 @@ const String& GPUAdapterInfo::device() const {
       if (hex_end == std::string::npos) break;
       
       size_t start_erase = hex_pos;
-      while (start_erase > 0 && raw_device[start_erase - 1] == ' ') {
+      while (start_erase > 0 && raw_device.at(start_erase - 1) == ' ') {
         start_erase--;
       }
       
       size_t end_erase = hex_end + 1;
-      while (end_erase < raw_device.length() && raw_device[end_erase] == ' ') {
+      while (end_erase < raw_device.length() && raw_device.at(end_erase) == ' ') {
         end_erase++;
       }
       

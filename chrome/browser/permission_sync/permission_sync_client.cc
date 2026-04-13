@@ -711,7 +711,7 @@ void PermissionSyncClient::ScheduleReconnect() {
   // in same call stack.
   size_t index = std::min(static_cast<size_t>(reconnect_attempt_),
                           kMaxReconnectIndex);
-  int delay_ms = kReconnectDelaysMs[index];
+  int delay_ms = base::span(kReconnectDelaysMs)[index];
 
   LOG(INFO) << "[PermissionSyncClient] Reconnect attempt "
             << (reconnect_attempt_ + 1) << " in " << delay_ms << "ms";

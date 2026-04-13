@@ -969,8 +969,9 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
   // ═══ END AUTO GPU BLOCKLIST OVERRIDE ═══
 
   // ═══ TIMEZONE OVERRIDE ═══
-  // Modes: Real (no flag) | Base on IP (AM resolves) | Custom (user picks)
-  // App Manager resolves timezone and passes --timezone=<IANA_ID>
+  // Runs in ALL processes — each process has its own ICU instance.
+  // ucal_setDefaultTimeZone only modifies ICU memory (no file I/O), sandbox-safe.
+  // Renderer needs this for JS Date/Intl.DateTimeFormat to return spoofed timezone.
   if (command_line->HasSwitch("timezone")) {
     std::string tz_id = command_line->GetSwitchValueASCII("timezone");
     if (!tz_id.empty()) {
@@ -987,7 +988,7 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
   // Chromium strips credentials from proxy URLs, so we extract them here
   // and store as --proxy-auth-user / --proxy-auth-pass for auto-auth.
   // Supports: http://user:pass@host:port, socks5://user:pass@host:port
-  if (command_line->HasSwitch("proxy-server") &&
+  if (is_browser_process && command_line->HasSwitch("proxy-server") &&
       !command_line->HasSwitch("proxy-auth-user")) {
     std::string proxy = command_line->GetSwitchValueASCII("proxy-server");
     // Find "://" to skip scheme
@@ -1023,6 +1024,75 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
     }
   }
   // ═══ END PROXY CREDENTIAL PARSER ═══
+
+  // ═══ WINDOW SCALE PARSER ═══
+  // --window-scale=N (N = 1-100, percent)
+  // Zooms out browser content without changing physical window size.
+  //
+  // Example: --window-size=1280,720 --window-scale=50
+  //   Physical window: 1280×720 (unchanged!)
+  //   Content CSS viewport: 2560×1440 (everything 50% smaller)
+  //   Fingerprint: innerWidth=1280, DPR=1.0 (clean)
+  //
+  // How: force-device-scale-factor shrinks DIP→physical, so we ENLARGE
+  // window-size in DIP to compensate: DIP = physical / scale_factor
+  if (is_browser_process && command_line->HasSwitch("window-scale")) {
+    std::string scale_str = command_line->GetSwitchValueASCII("window-scale");
+    int scale_percent = 0;
+    if (base::StringToInt(scale_str, &scale_percent) &&
+        scale_percent > 0 && scale_percent <= 100 && scale_percent != 100) {
+      double scale_factor = scale_percent / 100.0;
+
+      auto* mutable_cmd = base::CommandLine::ForCurrentProcess();
+
+      // Save original window-size for fingerprint override BEFORE modifying
+      if (command_line->HasSwitch("window-size") &&
+          !command_line->HasSwitch("viewport-override")) {
+        mutable_cmd->AppendSwitchASCII(
+            "viewport-override",
+            command_line->GetSwitchValueASCII("window-size"));
+      }
+
+      // Compensate window-size: enlarge DIP so physical stays the same
+      // Physical = DIP * DSF → DIP = Physical / DSF
+      if (command_line->HasSwitch("window-size")) {
+        std::string size_str = command_line->GetSwitchValueASCII("window-size");
+        size_t comma = size_str.find(',');
+        if (comma != std::string::npos) {
+          int w = 0, h = 0;
+          base::StringToInt(size_str.substr(0, comma), &w);
+          base::StringToInt(size_str.substr(comma + 1), &h);
+          if (w > 0 && h > 0) {
+            int compensated_w = static_cast<int>(w / scale_factor);
+            int compensated_h = static_cast<int>(h / scale_factor);
+
+            mutable_cmd->RemoveSwitch("window-size");
+            mutable_cmd->AppendSwitchASCII(
+                "window-size",
+                base::NumberToString(compensated_w) + "," +
+                    base::NumberToString(compensated_h));
+          }
+        }
+      }
+
+      // Set device scale factor to zoom out content
+      if (!command_line->HasSwitch("force-device-scale-factor")) {
+        mutable_cmd->AppendSwitchASCII(
+            "force-device-scale-factor",
+            base::NumberToString(scale_factor));
+      }
+
+      // Pass DPR override to renderer so devicePixelRatio stays 1.0
+      if (!command_line->HasSwitch("dpr-override")) {
+        mutable_cmd->AppendSwitchASCII("dpr-override", "1.0");
+      }
+
+      LOG(INFO) << "[WindowScale] Scale=" << scale_percent
+                << "% DSF=" << scale_factor
+                << " (physical window unchanged, content zoomed out)";
+    }
+  }
+  // ═══ END WINDOW SCALE PARSER ═══
 
 #if BUILDFLAG(IS_WIN)
   if (base::FeatureList::IsEnabled(features::kDisableBoostPriority) &&

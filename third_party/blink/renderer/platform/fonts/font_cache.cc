@@ -31,12 +31,16 @@
 
 #include <limits>
 #include <memory>
+#include <numeric>
+#include <random>
+#include <vector>
 
 #include "base/command_line.h"
 #include "base/debug/alias.h"
 #include "base/feature_list.h"
 #include "base/notreached.h"
 #include "base/strings/escape.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/system/sys_info.h"
 #include "base/timer/elapsed_timer.h"
 #include "base/trace_event/process_memory_dump.h"
@@ -137,6 +141,196 @@ class FontSubstitutionCache {
   HashMap<String, String> substitution_map_;
 };
 
+// Font exclusion cache for font fingerprinting protection.
+// When a font is in the exclusion list, GetFontPlatformData() returns nullptr,
+// making the font appear as "not installed" to ALL detection methods:
+// - document.fonts.check() → false
+// - new FontFace(...).load() → Promise rejected
+// - offsetWidth comparison → matches fallback font (font "doesn't exist")
+// This is the single interception point that covers BrowserScan, CreepJS,
+// and all other font enumeration fingerprinting tools.
+class FontExclusionCache {
+ public:
+  static FontExclusionCache& GetInstance() {
+    static base::NoDestructor<FontExclusionCache> instance;
+    return *instance;
+  }
+
+  bool ShouldExcludeFont(const AtomicString& family_name) const {
+    if (!enabled_) return false;
+    String family_lower = family_name.LowerASCII();
+    return excluded_fonts_.Contains(family_lower);
+  }
+
+  bool IsEnabled() const { return enabled_; }
+
+  FontExclusionCache(const FontExclusionCache&) = delete;
+  FontExclusionCache& operator=(const FontExclusionCache&) = delete;
+
+ private:
+  friend class base::NoDestructor<FontExclusionCache>;
+
+  // Candidate fonts that are SAFE to exclude (won't break websites).
+  // These are secondary/decorative/version-specific fonts found on Windows.
+  // Core fonts (Arial, Times New Roman, Courier New, etc.) are NOT included.
+  // Candidate fonts: SAFE to exclude (won't break core website rendering).
+  // Tier 1 = Windows version-specific fonts (ALWAYS installed, commonly fingerprinted)
+  // Tier 2 = Commonly fingerprinted misc fonts (safe, not used for body text)
+  // Tier 3 = CJK/script-specific fonts (usually installed but rarely used in CSS)
+  // NOTE: Core fonts (Arial, Times New Roman, Courier New, Segoe UI,
+  //        Calibri, Verdana, Tahoma, Georgia) are NEVER excluded.
+  static constexpr const char* kExclusionCandidates[] = {
+    // --- Tier 1: Windows version-specific (highest fingerprint value) ---
+    "Cambria Math",
+    "Lucida Console",
+    "Gadugi",
+    "Myanmar Text",
+    "Nirmala UI",
+    "Leelawadee UI",
+    "Javanese Text",
+    "Segoe UI Emoji",
+    "Bahnschrift",
+    "Ink Free",
+    "HoloLens MDL2 Assets",
+    "Segoe MDL2 Assets",
+    "Segoe Fluent Icons",
+    // --- Tier 2: Common misc fonts (safe to exclude) ---
+    "Comic Sans MS",
+    "Impact",
+    "Palatino Linotype",
+    "Lucida Sans Unicode",
+    "Franklin Gothic Medium",
+    "Consolas",
+    "Constantia",
+    "Corbel",
+    "Candara",
+    "Century Gothic",
+    "Gabriola",
+    "Sylfaen",
+    "Symbol",
+    "Webdings",
+    "Wingdings",
+    "Wingdings 2",
+    "Wingdings 3",
+    "Marlett",
+    "Book Antiqua",
+    "Bookman Old Style",
+    "Trebuchet MS",
+    "Arial Black",
+    "Monotype Corsiva",
+    "Haettenschweiler",
+    // --- Tier 3: CJK / Script-specific fonts ---
+    "MS Gothic",
+    "MS PGothic",
+    "MS Mincho",
+    "MS PMincho",
+    "MS UI Gothic",
+    "MV Boli",
+    "Mangal",
+    "Ebrima",
+    "Microsoft Himalaya",
+    "Microsoft Yi Baiti",
+    "Microsoft Tai Le",
+    "Microsoft New Tai Lue",
+    "Microsoft PhagsPa",
+    "Microsoft JhengHei",
+    "Microsoft YaHei",
+    "Malgun Gothic",
+    "Meiryo",
+    "Yu Gothic",
+    "SimSun",
+    "NSimSun",
+    "SimHei",
+    "FangSong",
+    "KaiTi",
+    "PMingLiU",
+    "MingLiU",
+    "DFKai-SB",
+  };
+
+  FontExclusionCache() {
+    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+    if (!command_line) {
+      LOG(WARNING) << "[FontExclusion] No command line!";
+      return;
+    }
+
+    // Option 1: Explicit exclusion list (highest priority)
+    if (command_line->HasSwitch("font-exclusion-list")) {
+      ParseExplicitList(
+          command_line->GetSwitchValueASCII("font-exclusion-list"));
+      LOG(WARNING) << "[FontExclusion] Explicit list: "
+                   << excluded_fonts_.size() << " fonts";
+      return;
+    }
+
+    // Auto-derive from font noise seeds passed by browser process.
+    uint64_t seed = 0;
+
+    if (command_line->HasSwitch("unicode-glyphs-seed")) {
+      std::string seed_str =
+          command_line->GetSwitchValueASCII("unicode-glyphs-seed");
+      base::StringToUint64(seed_str, &seed);
+      LOG(WARNING) << "[FontExclusion] unicode-glyphs-seed=" << seed_str
+                   << " parsed=" << seed;
+    } else if (command_line->HasSwitch("fonts-noise-seed")) {
+      std::string seed_str =
+          command_line->GetSwitchValueASCII("fonts-noise-seed");
+      base::StringToUint64(seed_str, &seed);
+      LOG(WARNING) << "[FontExclusion] fonts-noise-seed=" << seed_str
+                   << " parsed=" << seed;
+    } else {
+      LOG(WARNING) << "[FontExclusion] NO seed found! Exclusion DISABLED.";
+    }
+
+    if (seed != 0) {
+      GenerateFromSeed(seed ^ 0xA3B1C2D4E5F60718ULL);
+      LOG(WARNING) << "[FontExclusion] Generated " << excluded_fonts_.size()
+                   << " exclusions from seed";
+      for (const auto& font : excluded_fonts_) {
+        LOG(WARNING) << "[FontExclusion]   exclude: " << font.Utf8();
+      }
+    }
+  }
+
+  void ParseExplicitList(const std::string& list_str) {
+    std::vector<std::string> fonts = base::SplitString(
+        list_str, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    for (const auto& font : fonts) {
+      excluded_fonts_.insert(String::FromUTF8(font).LowerASCII());
+    }
+    enabled_ = !excluded_fonts_.empty();
+  }
+
+  void GenerateFromSeed(uint64_t seed) {
+    constexpr size_t num_candidates = std::size(kExclusionCandidates);
+
+    // Use seed to determine count (8-15) and which fonts to exclude
+    // Increased count ensures higher overlap with the exact 124 tools like BrowserScan test.
+    std::mt19937_64 gen(seed);
+    int count = 8 + static_cast<int>(gen() % 8);  // 8 to 15 fonts
+
+    // Fisher-Yates shuffle on indices
+    std::vector<size_t> indices(num_candidates);
+    std::iota(indices.begin(), indices.end(), 0);
+    for (size_t i = num_candidates - 1; i > 0; --i) {
+      size_t j = gen() % (i + 1);
+      std::swap(indices[i], indices[j]);
+    }
+
+    // Take first `count` indices as excluded fonts
+    for (int i = 0; i < count && i < static_cast<int>(num_candidates); ++i) {
+      size_t idx = indices[i];
+      excluded_fonts_.insert(
+          String::FromUTF8(base::span(kExclusionCandidates)[idx]).LowerASCII());
+    }
+    enabled_ = !excluded_fonts_.empty();
+  }
+
+  bool enabled_ = false;
+  HashSet<String> excluded_fonts_;
+};
+
 }  // namespace
 
 const char kColorEmojiLocale[] = "und-Zsye";
@@ -202,6 +396,18 @@ const FontPlatformData* FontCache::GetFontPlatformData(
   if (!platform_init_) {
     platform_init_ = true;
     PlatformInit();
+  }
+
+  // Font exclusion check: if font is in the exclusion list, return nullptr.
+  // This makes the font appear as "not installed" to ALL detection methods:
+  // - document.fonts.check() → returns false
+  // - new FontFace(...).load() → Promise rejected
+  // - offsetWidth → uses fallback font → width matches fallback
+  // Consistent across CreepJS, BrowserScan, and all font enumeration tools.
+  if (creation_params.CreationType() == kCreateFontByFamily &&
+      FontExclusionCache::GetInstance().ShouldExcludeFont(
+          creation_params.Family())) {
+    return nullptr;
   }
 
 #if !BUILDFLAG(IS_MAC)

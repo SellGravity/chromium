@@ -93,7 +93,7 @@ DOMPluginArray::DOMPluginArray(LocalDOMWindow* window) : window_(window) {
     
     // Create plugin objects up to the specified count
     for (int i = 0; i < plugins_count && i < 5; i++) {
-      dom_plugins_.push_back(MakeFakePlugin(kStandardPlugins[i], window));
+      dom_plugins_.push_back(MakeFakePlugin(base::span(kStandardPlugins)[i], window));
     }
   }
 }

@@ -190,6 +190,8 @@ scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
   }
 
   int bytes_per_pixel = bitmap.bytesPerPixel();
+  size_t total_bytes = static_cast<size_t>(width * height) * bytes_per_pixel;
+  auto pixel_span = base::span<uint8_t>(pixels, total_bytes);
   
   if (is_webgl) {
     // WebGL: GenLogin-style subtle noise — 5% of pixels, ±1, single channel
@@ -201,11 +203,11 @@ scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
       
       if (val % 20 == 0) {  // ~5% of pixels
         size_t offset = i * bytes_per_pixel;
-        if (pixels[offset + 3] > 0) {  // Skip fully transparent
+        if (pixel_span[offset + 3] > 0) {  // Skip fully transparent
           int channel = val % 3;  // 0=R, 1=G, 2=B
           int direction = ((val >> 4) & 1) ? 1 : -1;
-          int current = pixels[offset + channel];
-          pixels[offset + channel] = static_cast<uint8_t>(std::clamp(current + direction, 0, 255));
+          int current = pixel_span[offset + channel];
+          pixel_span[offset + channel] = static_cast<uint8_t>(std::clamp(current + direction, 0, 255));
         }
       }
     }
@@ -217,9 +219,9 @@ scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
     
     for (size_t i = 0; i < (size_t)(width * height); i++) {
       size_t offset = i * bytes_per_pixel;
-      uint8_t r = pixels[offset];
-      uint8_t g = pixels[offset + 1];
-      uint8_t a = pixels[offset + 3];
+      uint8_t r = pixel_span[offset];
+      uint8_t g = pixel_span[offset + 1];
+      uint8_t a = pixel_span[offset + 3];
       
       if (a > 0) {
         int color_hash = ((r << 8) ^ g) % 64;
@@ -234,11 +236,23 @@ scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
     // INTELLIGENT BYPASS: CreepJS simple math anomaly tests use < 5 colors.
     // Complex hashes (BrowserScan, CreepJS main hash) use > 15 unique colors natively due to anti-aliasing and gradients.
     if (unique_colors_approx > 15) {
-      int delta = (session_seed & 1) ? 1 : -1;
       for (size_t i = 0; i < (size_t)(width * height); i++) {
-        size_t offset = i * bytes_per_pixel;
-        if (pixels[offset + 3] > 0 && pixels[offset] > 0 && pixels[offset] < 255) {
-          pixels[offset] = pixels[offset] + delta; // Shift red channel globally by 1
+        // Per-pixel deterministic hash from seed + position
+        uint32_t val = static_cast<uint32_t>(
+            session_seed ^ (i * 31) ^ ((i % width) * 11) ^ ((i / width) * 17));
+        val = (val ^ (val >> 16)) * 0x85ebca6b;
+        val = val ^ (val >> 13);
+
+        if (val % 20 == 0) {  // ~5% of pixels — sparse enough for stealth
+          size_t offset = i * bytes_per_pixel;
+          if (pixel_span[offset + 3] > 0) {  // Skip transparent
+            int channel = val % 3;  // 0=R, 1=G, 2=B
+            int direction = ((val >> 4) & 1) ? 1 : -1;
+            int current = pixel_span[offset + channel];
+            if (current > 0 && current < 255) {
+              pixel_span[offset + channel] = static_cast<uint8_t>(current + direction);
+            }
+          }
         }
       }
     }
