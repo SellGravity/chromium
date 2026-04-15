@@ -126,6 +126,7 @@
 #include "third_party/blink/renderer/platform/network/mime/mime_type_registry.h"
 #include "third_party/blink/renderer/platform/network/network_state_notifier.h"
 #include "third_party/blink/renderer/platform/network/network_utils.h"
+#include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/weborigin/scheme_registry.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
@@ -649,13 +650,22 @@ void FrameFetchContext::AddClientHintsIfNecessary(
 
   using network::mojom::blink::WebClientHintsType;
 
+  // Anti-fingerprint: use overridden device memory if available
+  float effective_device_memory;
+  int override_memory = SessionNoiseCache::GetInstance().GetDeviceMemory();
+  if (override_memory > 0) {
+    effective_device_memory = static_cast<float>(override_memory);
+  } else {
+    effective_device_memory =
+        ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+  }
+
   if (ShouldSendClientHint(*policy, resource_origin, is_1p_origin,
                            WebClientHintsType::kDeviceMemory_DEPRECATED,
                            hints_preferences)) {
     request.SetHttpHeaderField(
         http_names::kDeviceMemory_DEPRECATED,
-        AtomicString(String::Number(
-            ApproximatedDeviceMemory::GetApproximatedDeviceMemory())));
+        AtomicString(String::Number(effective_device_memory)));
   }
 
   if (ShouldSendClientHint(*policy, resource_origin, is_1p_origin,
@@ -663,8 +673,7 @@ void FrameFetchContext::AddClientHintsIfNecessary(
                            hints_preferences)) {
     request.SetHttpHeaderField(
         http_names::kDeviceMemory,
-        AtomicString(String::Number(
-            ApproximatedDeviceMemory::GetApproximatedDeviceMemory())));
+        AtomicString(String::Number(effective_device_memory)));
   }
 
   if (ShouldSendClientHint(*policy, resource_origin, is_1p_origin,

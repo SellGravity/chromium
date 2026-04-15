@@ -285,7 +285,10 @@ ScopedRGBEmulationColorMask::ScopedRGBEmulationColorMask(
       requires_emulation_(drawing_buffer->RequiresAlphaChannelToBePreserved()) {
   if (requires_emulation_) {
     context_->active_scoped_rgb_emulation_color_masks_++;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
     base::span(color_mask_).copy_from(base::span(color_mask, 4u));
+#pragma clang diagnostic pop
     context_->ContextGL()->ColorMask(color_mask_[0], color_mask_[1],
                                      color_mask_[2], false);
   }
@@ -1967,6 +1970,8 @@ WebGLRenderingContextBase::PaintRenderingResultsToSnapshot(
 
           if (bpp >= 4 && width > 0 && height > 0) {
             size_t total_bytes = static_cast<size_t>(width * height) * bpp;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
             auto pixel_span = base::span<uint8_t>(pixels, total_bytes);
             for (int i = 0; i < width * height; i++) {
               uint32_t val = static_cast<uint32_t>(
@@ -1985,6 +1990,7 @@ WebGLRenderingContextBase::PaintRenderingResultsToSnapshot(
                 }
               }
             }
+#pragma clang diagnostic pop
 
             sk_sp<SkImage> noised = SkImages::RasterFromBitmap(bitmap);
             if (noised) {

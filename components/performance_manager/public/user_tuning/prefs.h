@@ -38,7 +38,9 @@ inline constexpr char kMemorySaverModeState[] =
 inline constexpr char kMemorySaverModeTimeBeforeDiscardInMinutes[] =
     "performance_tuning.high_efficiency_mode.time_before_discard_in_minutes";
 
-constexpr int kDefaultMemorySaverModeTimeBeforeDiscardInMinutes = 120;
+// GravityBrowser: Reduced from 120 to 15 minutes for aggressive RAM optimization.
+// Background tabs are discarded after 15 minutes of inactivity.
+constexpr int kDefaultMemorySaverModeTimeBeforeDiscardInMinutes = 15;
 
 enum class MemorySaverModeAggressiveness {
   kConservative = 0,

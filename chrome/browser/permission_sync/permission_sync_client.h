@@ -208,10 +208,15 @@ class PermissionSyncClient
   // Reconnection state (FRS 3.1.3: exponential backoff)
   base::OneShotTimer reconnect_timer_;
   int reconnect_attempt_ = 0;
-  // Backoff delays: 100ms → 300ms → 1s → 3s (max)
-  // Fast initial retries for pipe death during startup.
-  static constexpr int kReconnectDelaysMs[] = {100, 300, 1000, 3000};
-  static constexpr size_t kMaxReconnectIndex = 3;
+  // Backoff delays: 100ms → 300ms → 1s → 3s → 10s → 30s → 60s → 300s (max)
+  // GravityBrowser: Extended from max 3s to max 5min to prevent
+  // ERR_CONNECTION_REFUSED spam when server is offline.
+  static constexpr int kReconnectDelaysMs[] = {
+      100, 300, 1000, 3000, 10000, 30000, 60000, 300000};
+  static constexpr size_t kMaxReconnectIndex = 7;
+  // Stop retrying after 20 attempts (~10 minutes total).
+  // Browser continues working with startup rules (fail-closed).
+  static constexpr int kMaxReconnectAttempts = 20;
 
   // Fix #11: Connection timeout (FRS 3.5.1: 5 seconds).
   base::OneShotTimer connection_timeout_timer_;

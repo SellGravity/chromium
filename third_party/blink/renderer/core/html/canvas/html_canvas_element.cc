@@ -191,6 +191,8 @@ scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
 
   int bytes_per_pixel = bitmap.bytesPerPixel();
   size_t total_bytes = static_cast<size_t>(width * height) * bytes_per_pixel;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
   auto pixel_span = base::span<uint8_t>(pixels, total_bytes);
   
   if (is_webgl) {
@@ -257,6 +259,7 @@ scoped_refptr<StaticBitmapImage> ApplyStealthNoise(
       }
     }
   }
+#pragma clang diagnostic pop
 
   // Create new image from modified bitmap
   sk_sp<SkImage> noised_sk_image = SkImages::RasterFromBitmap(bitmap);
@@ -1443,17 +1446,17 @@ String HTMLCanvasElement::ToDataURLInternal(
     
     // Differentiate between WebGL and Canvas 2D noise
     CanvasRenderingContext* context = RenderingContext();
-    auto* cmd = base::CommandLine::ForCurrentProcess();
+    static const bool has_canvas_seed = [] {
+      auto* cmd = base::CommandLine::ForCurrentProcess();
+      return cmd && cmd->HasSwitch("canvas-seed");
+    }();
     bool use_custom_noise = false;
-    if (cmd) {
-      if (context && context->IsWebGL()) {
-        // WebGL noise DISABLED: BrowserScan detects it by comparing
-        // webglCanvas.toDataURL() vs drawImage→2D.toDataURL()
-        // Since WARP rendering is identical for all spoofed GPUs, noise is unnecessary
-        use_custom_noise = false;
-      } else {
-        use_custom_noise = cmd->HasSwitch("canvas-seed");
-      }
+    if (context && context->IsWebGL()) {
+      // WebGL noise DISABLED: BrowserScan detects it by comparing
+      // webglCanvas.toDataURL() vs drawImage→2D.toDataURL()
+      use_custom_noise = false;
+    } else {
+      use_custom_noise = has_canvas_seed;
     }
     
     if (use_custom_noise) {
@@ -1574,15 +1577,16 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
     
     // Differentiate between WebGL and Canvas 2D noise
     CanvasRenderingContext* context_ptr = RenderingContext();
-    auto* cmd = base::CommandLine::ForCurrentProcess();
+    static const bool has_canvas_seed = [] {
+      auto* cmd = base::CommandLine::ForCurrentProcess();
+      return cmd && cmd->HasSwitch("canvas-seed");
+    }();
     bool use_custom_noise = false;
-    if (cmd) {
-      if (context_ptr && context_ptr->IsWebGL()) {
-        // WebGL noise DISABLED: BrowserScan detects it via cross-path comparison
-        use_custom_noise = false;
-      } else {
-        use_custom_noise = cmd->HasSwitch("canvas-seed");
-      }
+    if (context_ptr && context_ptr->IsWebGL()) {
+      // WebGL noise DISABLED: BrowserScan detects it via cross-path comparison
+      use_custom_noise = false;
+    } else {
+      use_custom_noise = has_canvas_seed;
     }
     
     if (use_custom_noise) {

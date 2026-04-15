@@ -53,8 +53,11 @@ bool IsNGTextOrInline(const LayoutObject* object) {
 // Micro-noise for SVG text metrics (getComputedTextLength, getSubStringLength)
 // Same design as Canvas TextMetrics: invisible to eye, changes fingerprint hash
 float ApplySvgTextMicroNoise(float value) {
-  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (!command_line || !command_line->HasSwitch("fonts-noise")) {
+  static const bool fonts_noise_enabled = [] {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    return cmd && cmd->HasSwitch("fonts-noise");
+  }();
+  if (!fonts_noise_enabled) {
     return value;
   }
 

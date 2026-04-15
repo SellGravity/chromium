@@ -109,13 +109,13 @@ PermissionSyncNavigationThrottle::CheckPermission() {
       if (decision.action == PermissionAction::ALLOW &&
           !decision.matched_rule_id.empty()) {
         server_allowed = true;
-        LOG(INFO) << "[GraBrowser] Server WHITELISTED internal page: "
-                  << url.spec() << " (rule: " << decision.matched_rule_id << ")";
+        DVLOG(1) << "[GraBrowser] Server WHITELISTED internal page: "
+                   << url.spec() << " (rule: " << decision.matched_rule_id << ")";
       }
     }
 
     if (!server_allowed) {
-      LOG(INFO) << "[GraBrowser] BLOCKED internal page: " << url.spec();
+      DVLOG(1) << "[GraBrowser] BLOCKED internal page: " << url.spec();
       return ThrottleCheckResult(CANCEL, net::ERR_BLOCKED_BY_ADMINISTRATOR,
                                  CreateRestrictedPageError(std::string(url.host())));
     }
@@ -138,8 +138,8 @@ PermissionSyncNavigationThrottle::CheckPermission() {
         cache_manager_->EvaluateFromCache(domain, resource_type);
 
     if (decision.action == PermissionAction::BLOCK) {
-      LOG(INFO) << "[PermissionSync] BLOCKED: " << url.spec()
-                << " | Reason: " << decision.reason;
+      DVLOG(1) << "[PermissionSync] BLOCKED: " << url.spec()
+                  << " | Reason: " << decision.reason;
       return ThrottleCheckResult(CANCEL, net::ERR_BLOCKED_BY_ADMINISTRATOR,
                                  CreateBlockedErrorPage(url.spec()));
     }
@@ -154,9 +154,9 @@ PermissionSyncNavigationThrottle::CheckPermission() {
     PermissionDecision decision =
         cache_manager_->EvaluateFromCache(domain, resource_type);
     if (decision.action == PermissionAction::BLOCK) {
-      LOG(INFO) << "[PermissionSync] BLOCKED (cached, state="
-                << static_cast<int>(state) << "): " << url.spec()
-                << " | Reason: " << decision.reason;
+      DVLOG(1) << "[PermissionSync] BLOCKED (cached, state="
+                  << static_cast<int>(state) << "): " << url.spec()
+                  << " | Reason: " << decision.reason;
       return ThrottleCheckResult(CANCEL, net::ERR_BLOCKED_BY_ADMINISTRATOR,
                                  CreateBlockedErrorPage(url.spec()));
     }
@@ -168,8 +168,8 @@ PermissionSyncNavigationThrottle::CheckPermission() {
   // ── NO RULES AT ALL → fail-open (ALLOW everything) ──
   // No startup rules, never synced. Don't block the user.
   // WS will sync rules in background; once synced, rules will apply.
-  LOG(INFO) << "[PermissionSync] ALLOWED (no rules loaded yet, fail-open): "
-            << url.spec();
+  DVLOG(1) << "[PermissionSync] ALLOWED (no rules loaded yet, fail-open): "
+              << url.spec();
   return PROCEED;
 }
 

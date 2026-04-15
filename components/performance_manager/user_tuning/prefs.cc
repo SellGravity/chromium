@@ -25,10 +25,13 @@ void RegisterLocalStatePrefs(PrefRegistrySimple* registry) {
       kMemorySaverModeTimeBeforeDiscardInMinutes,
       kDefaultMemorySaverModeTimeBeforeDiscardInMinutes);
   registry->RegisterIntegerPref(
-      kMemorySaverModeState, static_cast<int>(MemorySaverModeState::kDisabled));
+      // GravityBrowser: Enable Memory Saver by default to reduce RAM usage.
+      // Background tabs will be discarded after inactivity timeout.
+      kMemorySaverModeState, static_cast<int>(MemorySaverModeState::kEnabled));
+  // GravityBrowser: Use aggressive mode for faster tab discarding.
   registry->RegisterIntegerPref(
       kMemorySaverModeAggressiveness,
-      static_cast<int>(MemorySaverModeAggressiveness::kMedium));
+      static_cast<int>(MemorySaverModeAggressiveness::kAggressive));
   registry->RegisterIntegerPref(
       kBatterySaverModeState,
       static_cast<int>(BatterySaverModeState::kEnabledBelowThreshold));

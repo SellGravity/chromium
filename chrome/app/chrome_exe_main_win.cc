@@ -132,7 +132,15 @@ bool HasPermissionMarker(const std::wstring& dir) {
   }
   
   // Ensure null-termination
-  stored_path[bytes_read / sizeof(wchar_t)] = L'\0';
+  size_t char_count = bytes_read / sizeof(wchar_t);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+  if (char_count <= MAX_PATH) {
+    stored_path[char_count] = L'\0';
+  } else {
+    stored_path[MAX_PATH] = L'\0';
+  }
+#pragma clang diagnostic pop
   
   // Step 3 & 4: Compare stored path with current directory
   // Case-insensitive comparison for Windows paths
@@ -268,8 +276,8 @@ void EnsureSandboxPermissions() {
   // Only run for browser process (not renderer, GPU, etc.)
   // Note: At this early stage, we check command line for --type= switch
   // since InitializeProcessType() hasn't been called yet
-  LPWSTR cmd_line = ::GetCommandLineW();
-  if (cmd_line && wcsstr(cmd_line, L"--type=")) {
+  std::wstring cmd_line_str(::GetCommandLineW() ? ::GetCommandLineW() : L"");
+  if (cmd_line_str.find(L"--type=") != std::wstring::npos) {
     return;  // This is a child process, skip
   }
 

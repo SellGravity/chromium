@@ -201,13 +201,16 @@ void MemorySaverModePolicy::DiscardPageTimerCallback(
 
 base::TimeDelta MemorySaverModePolicy::GetTimeBeforeDiscardForCurrentMode()
     const {
+  // GravityBrowser: Reduced from hours to minutes for aggressive RAM savings.
+  // Original: Conservative=6h, Medium=4h, Aggressive=2h
+  // New:      Conservative=30m, Medium=15m, Aggressive=5m
   switch (mode_) {
     case MemorySaverModeAggressiveness::kConservative:
-      return base::Hours(6);
+      return base::Minutes(30);
     case MemorySaverModeAggressiveness::kMedium:
-      return base::Hours(4);
+      return base::Minutes(15);
     case MemorySaverModeAggressiveness::kAggressive:
-      return base::Hours(2);
+      return base::Minutes(5);
   }
   NOTREACHED();
 }

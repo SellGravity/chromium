@@ -125,10 +125,13 @@ static constexpr char kSqliteMainDatabaseName[] = "main";
 // Magic path value telling sqlite3_open_v2() to open an in-memory database.
 static constexpr char kSqliteOpenInMemoryPath[] = ":memory:";
 
-// Spin for up to a second waiting for the lock to clear when setting
-// up the database.
-// TODO(shess): Better story on this.  http://crbug.com/56559
-const int kBusyTimeoutSeconds = 1;
+// GravityBrowser: Increased from 1s to 10s.
+// Crash dump analysis shows NtWriteFile blocking on SQLite lock contention.
+// With 1s timeout, SQLite gives up too quickly and returns SQLITE_BUSY,
+// which cascades into browser hang. 10s gives enough time for the lock
+// holder (or external process like Defender) to release.
+// Original bug: http://crbug.com/56559
+const int kBusyTimeoutSeconds = 10;
 
 constexpr int kPrepareFlags = SQLITE_PREPARE_NO_VTAB;
 
@@ -1384,6 +1387,12 @@ SqliteResultCode Database::ExecuteAndReturnResultCode(
     base::cstring_view initial_sql) {
   TRACE_EVENT0("sql", "Database::ExecuteAndReturnErrorCode");
 
+  // GravityBrowser: SLOW_SQL diagnostic logging.
+  // Measures wall-clock time of the entire Execute call.
+  // If >500ms, logs the SQL query and database file path.
+  // This captures the exact operation causing hang/crash.
+  base::ElapsedTimer slow_sql_timer;
+
   if (!db_) {
     DCHECK(poisoned_) << "Illegal use of Database without a db";
     return SqliteResultCode::kError;
@@ -1466,6 +1475,15 @@ SqliteResultCode Database::ExecuteAndReturnResultCode(
   // calls such as CREATE TABLE IF NOT EXISTS which could modify the database
   // but sometimes don't.
   ReleaseCacheMemoryIfNeeded(true);
+
+  // GravityBrowser: Log slow SQL operations (>500ms).
+  const base::TimeDelta elapsed = slow_sql_timer.Elapsed();
+  if (elapsed > base::Milliseconds(500)) {
+    LOG(WARNING) << "[SLOW_SQL] " << elapsed.InMilliseconds() << "ms"
+                 << " | DB: " << DbPath().MaybeAsASCII()
+                 << " | SQL: " << initial_sql.c_str()
+                 << " | Result: " << static_cast<int>(sqlite_result_code);
+  }
 
   DCHECK_NE(sqlite_result_code, SqliteResultCode::kDone)
       << __func__ << " about to return unexpected non-error result code";

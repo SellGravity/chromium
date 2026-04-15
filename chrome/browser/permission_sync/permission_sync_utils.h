@@ -38,7 +38,7 @@ inline bool IsBlockedChromeURL(const GURL& url) {
          host == "policy" ||         // Applied policies
          host == "settings" ||       // Browser settings, proxy config
          host == "extensions" ||     // Installed extensions info
-         host == "history" ||        // Browsing history
+         // host == "history" ||        // Browsing history (temporarily unblocked)
          host == "downloads" ||      // Download history
          host == "components";       // Internal components & versions
 }

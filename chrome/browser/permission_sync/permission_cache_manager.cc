@@ -181,9 +181,8 @@ void PermissionCacheManager::SetConnectionState(ConnectionState new_state) {
 
   connection_state_.store(new_state, std::memory_order_release);
 
-  LOG(INFO) << "[PermissionCacheManager] State transition: "
-            << StateToString(old_state) << " → "
-            << StateToString(new_state);
+  DVLOG(1) << "[Cache] State: " << StateToString(old_state)
+            << " -> " << StateToString(new_state);
 
   // Fix #1: When transitioning to SYNCHRONIZED, drain pending requests.
   if (new_state == ConnectionState::SYNCHRONIZED) {

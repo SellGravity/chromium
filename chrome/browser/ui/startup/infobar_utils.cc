@@ -182,15 +182,17 @@ void AddInfoBarsIfNecessary(BrowserWindowInterface* browser,
   infobars_shown = true;
 
   if (show_bad_flags_security_warnings) {
-    ShowBadFlagsPrompt(web_contents);
+    // GravityBrowser: Disabled bad flags warning infobar.
+    // ShowBadFlagsPrompt(web_contents);
   }
 
   infobars::ContentInfoBarManager* infobar_manager =
       infobars::ContentInfoBarManager::FromWebContents(web_contents);
 
-  if (!google_apis::HasAPIKeyConfigured()) {
-    GoogleApiKeysInfoBarDelegate::Create(infobar_manager);
-  }
+  // GravityBrowser: Disabled Google API keys missing infobar.
+  // if (!google_apis::HasAPIKeyConfigured()) {
+  //   GoogleApiKeysInfoBarDelegate::Create(infobar_manager);
+  // }
 
   if (ObsoleteSystem::IsObsoleteNowOrSoon()) {
     PrefService* local_state = g_browser_process->local_state();

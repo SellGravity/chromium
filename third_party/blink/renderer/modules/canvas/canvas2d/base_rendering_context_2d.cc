@@ -575,25 +575,29 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
     }
     
-    // Check for custom canvas-noise flag via its passed seed and apply intelligent 1-pixel noise
-    auto* cmd = base::CommandLine::ForCurrentProcess();
-    if (cmd && cmd->HasSwitch("canvas-seed")) {
+    // Check for custom canvas-noise flag via cached result
+    static const bool has_canvas_seed = [] {
+      auto* cmd = base::CommandLine::ForCurrentProcess();
+      return cmd && cmd->HasSwitch("canvas-seed");
+    }();
+    if (has_canvas_seed) {
       uint64_t session_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
       if (session_seed != 0 && sw >= 4 && sh >= 4) {
         uint8_t* pixels = static_cast<uint8_t*>(image_data_pixmap.writable_addr());
         if (pixels) {
-          size_t total_bytes = static_cast<size_t>(sw * sh) * 4;
-          auto pixel_span = base::span<uint8_t>(pixels, total_bytes);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunsafe-buffer-usage"
+          size_t total_pixels = static_cast<size_t>(sw) * static_cast<size_t>(sh);
           
           // Count unique colors using a simple hash set mask (fast approximation)
           uint64_t color_mask = 0;
           int unique_colors_approx = 0;
           
-          for (size_t i = 0; i < (size_t)(sw * sh); i++) {
+          for (size_t i = 0; i < total_pixels; i++) {
             size_t offset = i * 4;
-            uint8_t r = pixel_span[offset];
-            uint8_t g = pixel_span[offset + 1];
-            uint8_t a = pixel_span[offset + 3];
+            uint8_t r = pixels[offset];
+            uint8_t g = pixels[offset + 1];
+            uint8_t a = pixels[offset + 3];
             
             if (a > 0) {
               int color_hash = ((r << 8) ^ g) % 64;
@@ -606,28 +610,29 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
           }
           
           // INTELLIGENT BYPASS: CreepJS simple math anomaly tests use < 5 colors.
-          // Complex hashes (BrowserScan, CreepJS main hash) use > 15 unique colors natively due to anti-aliasing and gradients.
+          // Complex hashes use > 15 unique colors due to anti-aliasing and gradients.
           if (unique_colors_approx > 15) {
-            for (size_t i = 0; i < (size_t)(sw * sh); i++) {
+            for (size_t i = 0; i < total_pixels; i++) {
               // Per-pixel deterministic hash from seed + position
               uint32_t val = static_cast<uint32_t>(
                   session_seed ^ (i * 31) ^ ((i % sw) * 11) ^ ((i / sw) * 17));
               val = (val ^ (val >> 16)) * 0x85ebca6b;
               val = val ^ (val >> 13);
 
-              if (val % 20 == 0) {  // ~5% of pixels — sparse enough for stealth
+              if (val % 20 == 0) {  // ~5% of pixels
                 size_t offset = i * 4;
-                if (pixel_span[offset + 3] > 0) {  // Skip transparent
+                if (pixels[offset + 3] > 0) {  // Skip transparent
                   int channel = val % 3;  // 0=R, 1=G, 2=B
                   int direction = ((val >> 4) & 1) ? 1 : -1;
-                  int current = pixel_span[offset + channel];
+                  int current = pixels[offset + channel];
                   if (current > 0 && current < 255) {
-                    pixel_span[offset + channel] = static_cast<uint8_t>(current + direction);
+                    pixels[offset + channel] = static_cast<uint8_t>(current + direction);
                   }
                 }
               }
             }
           }
+#pragma clang diagnostic pop
         }
       }
     }

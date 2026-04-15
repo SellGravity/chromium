@@ -136,7 +136,7 @@ void PermissionSyncClient::Connect() {
     return;
   }
 
-  LOG(INFO) << "[PermissionSyncClient] Resolved fresh NetworkContext "
+  DVLOG(1) << "[PermissionSyncClient] Resolved fresh NetworkContext "
             << "for connection attempt";
   Connect(nc);
 }
@@ -151,8 +151,7 @@ void PermissionSyncClient::Connect(
   network_context_ = network_context;
   ResetConnection();
 
-  LOG(INFO) << "[PermissionSyncClient] Connecting to " << ws_url_
-            << " (background sync)";
+  DVLOG(1) << "[WS] Connecting to " << ws_url_;
 
   // If already SYNCHRONIZED from startup rules, don't regress to
   // CONNECTING. WebSocket is supplementary — for runtime updates.
@@ -201,7 +200,7 @@ void PermissionSyncClient::Connect(
 }
 
 void PermissionSyncClient::Disconnect() {
-  LOG(INFO) << "[PermissionSyncClient] Disconnecting";
+  DVLOG(1) << "[PermissionSyncClient] Disconnecting";
 
   StopHeartbeatTimer();
   reconnect_timer_.Stop();
@@ -236,16 +235,21 @@ bool PermissionSyncClient::IsSynchronized() const {
 
 void PermissionSyncClient::OnOpeningHandshakeStarted(
     network::mojom::WebSocketHandshakeRequestPtr request) {
-  LOG(INFO) << "[PermissionSyncClient] Handshake started with "
+  DVLOG(1) << "[PermissionSyncClient] Handshake started with "
             << request->url;
 }
 
 void PermissionSyncClient::OnFailure(const std::string& message,
                                       int32_t net_error,
                                       int32_t response_code) {
-  LOG(ERROR) << "[PermissionSyncClient] Connection failed: " << message
-             << " (net_error=" << net_error
-             << ", response_code=" << response_code << ")";
+  // GravityBrowser: Throttle log noise — only log every 5th failure
+  // to avoid spamming console when server is offline.
+  if (reconnect_attempt_ < 5 || reconnect_attempt_ % 5 == 0) {
+    LOG(ERROR) << "[PermissionSyncClient] Connection failed: " << message
+               << " (net_error=" << net_error
+               << ", response_code=" << response_code
+               << ", attempt=" << reconnect_attempt_ << ")";
+  }
 
   connection_timeout_timer_.Stop();
   ResetConnection();
@@ -266,7 +270,7 @@ void PermissionSyncClient::OnConnectionEstablished(
     network::mojom::WebSocketHandshakeResponsePtr response,
     mojo::ScopedDataPipeConsumerHandle readable,
     mojo::ScopedDataPipeProducerHandle writable) {
-  LOG(INFO) << "[PermissionSyncClient] WebSocket connection established";
+  DVLOG(1) << "[WS] Connected";
 
   // Cancel connection timeout — we connected successfully.
   connection_timeout_timer_.Stop();
@@ -345,7 +349,7 @@ void PermissionSyncClient::OnDropChannel(bool was_clean,
   // If we have startup rules, browser is unaffected.
   if (cache_manager_->HasStartupRules()) {
     if (code == 1001) {
-      LOG(INFO) << "[PermissionSyncClient] 1001 received but startup "
+      DVLOG(1) << "[PermissionSyncClient] 1001 received but startup "
                 << "rules active. Browser unaffected. Will retry.";
     }
     // Don't change state — stay SYNCHRONIZED.
@@ -357,7 +361,7 @@ void PermissionSyncClient::OnDropChannel(bool was_clean,
 }
 
 void PermissionSyncClient::OnClosingHandshake() {
-  LOG(INFO) << "[PermissionSyncClient] Server initiated closing handshake";
+  DVLOG(1) << "[PermissionSyncClient] Server initiated closing handshake";
 }
 
 // ============================================================================
@@ -675,7 +679,7 @@ void PermissionSyncClient::StartHeartbeatTimer() {
                        base::BindOnce(&PermissionSyncClient::OnHeartbeatTimeout,
                                       weak_factory_.GetWeakPtr()));
 
-  LOG(INFO) << "[PermissionSyncClient] Heartbeat started ("
+  DVLOG(1) << "[PermissionSyncClient] Heartbeat started ("
             << kHeartbeatInterval.InSeconds() << "s interval, "
             << kTimeoutDuration.InSeconds() << "s timeout)";
 }
@@ -706,6 +710,16 @@ void PermissionSyncClient::ScheduleReconnect() {
     return;
   }
 
+  // GravityBrowser: Stop reconnecting after max attempts to prevent
+  // resource leak (handle accumulation, log spam).
+  if (reconnect_attempt_ >= kMaxReconnectAttempts) {
+    LOG(WARNING) << "[PermissionSyncClient] Max reconnect attempts ("
+                 << kMaxReconnectAttempts << ") reached. "
+                 << "Stopping retry. Browser continues with startup rules. "
+                 << "Restart browser to retry connection.";
+    return;
+  }
+
   // Fix #1: Always use timer for reconnection (no synchronous dispatch).
   // Eliminates WeakPtr crash when ResetConnection invalidates ptrs
   // in same call stack.
@@ -713,8 +727,8 @@ void PermissionSyncClient::ScheduleReconnect() {
                           kMaxReconnectIndex);
   int delay_ms = base::span(kReconnectDelaysMs)[index];
 
-  LOG(INFO) << "[PermissionSyncClient] Reconnect attempt "
-            << (reconnect_attempt_ + 1) << " in " << delay_ms << "ms";
+  DVLOG(1) << "[WS] Reconnect #" << (reconnect_attempt_ + 1)
+              << " in " << delay_ms << "ms";
 
   reconnect_attempt_++;
 
@@ -725,7 +739,7 @@ void PermissionSyncClient::ScheduleReconnect() {
 }
 
 void PermissionSyncClient::OnReconnectTimer() {
-  LOG(INFO) << "[PermissionSyncClient] Attempting reconnection...";
+  DVLOG(1) << "[PermissionSyncClient] Attempting reconnection...";
 
   // Check if standalone NC is still alive. If not, recreate it.
   if (standalone_nc_.is_bound() && !standalone_nc_.is_connected()) {

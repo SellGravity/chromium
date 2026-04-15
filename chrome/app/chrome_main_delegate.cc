@@ -1026,21 +1026,85 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
   // ═══ END PROXY CREDENTIAL PARSER ═══
 
   // ═══ WINDOW SCALE PARSER ═══
-  // --window-scale=N (N = 1-100, percent)
+  // --window-scale=N (N = 1-100, percent) or --window-scale=auto
   // Zooms out browser content without changing physical window size.
   //
-  // Example: --window-size=1280,720 --window-scale=50
-  //   Physical window: 1280×720 (unchanged!)
-  //   Content CSS viewport: 2560×1440 (everything 50% smaller)
-  //   Fingerprint: innerWidth=1280, DPR=1.0 (clean)
+  // Modes:
+  //   --window-scale=50      Fixed 50% scale
+  //   --window-scale=auto    Auto-calculate from window-size
+  //
+  // Auto formula:
+  //   scale = min(windowWidth / 1920, windowHeight / 1080)
+  //   Clamp to [10%, 100%], round to integer.
+  //
+  // Example: --window-size=640,540 --window-scale=auto
+  //   scale = min(640/1920, 540/1080) = min(0.333, 0.5) = 0.333 → 33%
+  //   Physical window: 640×540 (unchanged!)
+  //   Content CSS viewport: ~1939×1636 (everything 33% smaller)
+  //   Fingerprint: innerWidth=640, DPR=1.0 (clean)
   //
   // How: force-device-scale-factor shrinks DIP→physical, so we ENLARGE
   // window-size in DIP to compensate: DIP = physical / scale_factor
   if (is_browser_process && command_line->HasSwitch("window-scale")) {
     std::string scale_str = command_line->GetSwitchValueASCII("window-scale");
     int scale_percent = 0;
-    if (base::StringToInt(scale_str, &scale_percent) &&
-        scale_percent > 0 && scale_percent <= 100 && scale_percent != 100) {
+
+    // Reference design size for auto calculation
+    // Reference = actual screen resolution (not hardcoded).
+    // GetSystemMetrics returns primary monitor size in physical pixels.
+    int kRefWidth = 1920;   // fallback
+    int kRefHeight = 1080;  // fallback
+#if BUILDFLAG(IS_WIN)
+    int detected_w = ::GetSystemMetrics(SM_CXSCREEN);
+    int detected_h = ::GetSystemMetrics(SM_CYSCREEN);
+    if (detected_w > 0 && detected_h > 0) {
+      kRefWidth = detected_w;
+      kRefHeight = detected_h;
+    }
+#endif
+    constexpr int kMinScale = 10;
+    constexpr int kMaxScale = 100;
+
+    if (scale_str == "auto") {
+      // ── AUTO MODE ──
+      // Calculate scale from window-size using:
+      //   scale = min(W / 1920, H / 1080)
+      if (command_line->HasSwitch("window-size")) {
+        std::string size_str =
+            command_line->GetSwitchValueASCII("window-size");
+        size_t comma = size_str.find(',');
+        if (comma != std::string::npos) {
+          int w = 0, h = 0;
+          base::StringToInt(size_str.substr(0, comma), &w);
+          base::StringToInt(size_str.substr(comma + 1), &h);
+          if (w > 0 && h > 0) {
+            double scale_x = static_cast<double>(w) / kRefWidth;
+            double scale_y = static_cast<double>(h) / kRefHeight;
+            double scale = std::min(scale_x, scale_y);
+            scale_percent = static_cast<int>(std::round(scale * 100.0));
+            scale_percent = std::max(kMinScale, std::min(kMaxScale,
+                                                         scale_percent));
+            LOG(INFO) << "[WindowScale] Auto: window=" << w << "x" << h
+                      << " ref=" << kRefWidth << "x" << kRefHeight
+                      << " scaleX=" << scale_x << " scaleY=" << scale_y
+                      << " → " << scale_percent << "%";
+          }
+        }
+      }
+      if (scale_percent == 0) {
+        LOG(WARNING) << "[WindowScale] Auto mode requires --window-size. "
+                     << "Falling back to 100%.";
+        scale_percent = 100;
+      }
+    } else {
+      // ── FIXED MODE ──
+      if (!base::StringToInt(scale_str, &scale_percent) ||
+          scale_percent <= 0 || scale_percent > 100) {
+        scale_percent = 0;  // Invalid → skip
+      }
+    }
+
+    if (scale_percent > 0 && scale_percent != 100) {
       double scale_factor = scale_percent / 100.0;
 
       auto* mutable_cmd = base::CommandLine::ForCurrentProcess();

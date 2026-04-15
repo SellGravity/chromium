@@ -78,18 +78,21 @@ float EnsureFinite(float x, float default_value) {
   return std::isfinite(x) ? x : default_value;
 }
 
-// Check if audio noise is enabled via command-line flag
+// Check if audio noise is enabled via command-line flag (cached)
 bool IsAudioNoiseEnabled() {
-  auto* cmd = base::CommandLine::ForCurrentProcess();
-  return cmd && cmd->HasSwitch("audio-noise");
+  static const bool enabled = [] {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    return cmd && cmd->HasSwitch("audio-noise");
+  }();
+  return enabled;
 }
 
 // Cached noise values for AnalyserNode readback methods.
-// Computed once from SessionNoiseCache audio seed, reused on every call.
+// Uses lazy heap allocation — zero memory cost when audio noise is disabled.
 struct AnalyserNoiseCache {
   static constexpr size_t kMaxBins = 16384;  // Max FFT size / 2
-  std::array<float, kMaxBins> frequency_noise = {};
-  std::array<float, kMaxBins * 2> time_domain_noise = {};  // Max FFT size
+  std::unique_ptr<std::array<float, kMaxBins>> frequency_noise;
+  std::unique_ptr<std::array<float, kMaxBins * 2>> time_domain_noise;
   bool initialized = false;
 
   void Initialize() {
@@ -100,12 +103,15 @@ struct AnalyserNoiseCache {
       audio_seed = SessionNoiseCache::GetInstance().GetSessionSeed();
     }
 
+    frequency_noise = std::make_unique<std::array<float, kMaxBins>>();
+    time_domain_noise = std::make_unique<std::array<float, kMaxBins * 2>>();
+
     // Generate deterministic frequency noise (±0.0001 dB)
     {
       std::mt19937_64 gen(audio_seed ^ 0xA1A2A3A4A5A6A7A8ULL);
       std::uniform_real_distribution<float> dis(-0.0001f, 0.0001f);
       for (size_t i = 0; i < kMaxBins; ++i) {
-        frequency_noise[i] = dis(gen);
+        (*frequency_noise)[i] = dis(gen);
       }
     }
 
@@ -114,7 +120,7 @@ struct AnalyserNoiseCache {
       std::mt19937_64 gen(audio_seed ^ 0xB1B2B3B4B5B6B7B8ULL);
       std::uniform_real_distribution<float> dis(-1e-7f, 1e-7f);
       for (size_t i = 0; i < kMaxBins * 2; ++i) {
-        time_domain_noise[i] = dis(gen);
+        (*time_domain_noise)[i] = dis(gen);
       }
     }
 
@@ -122,7 +128,11 @@ struct AnalyserNoiseCache {
   }
 };
 
-static AnalyserNoiseCache g_analyser_noise;
+// Intentionally leaked to avoid exit-time destructor.
+AnalyserNoiseCache& GetAnalyserNoiseCache() {
+  static AnalyserNoiseCache* instance = new AnalyserNoiseCache();
+  return *instance;
+}
 
 }  // namespace
 
@@ -166,7 +176,7 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
 
   const bool apply_noise = IsAudioNoiseEnabled();
   if (apply_noise) {
-    g_analyser_noise.Initialize();
+    GetAnalyserNoiseCache().Initialize();
   }
 
   // Convert from linear magnitude to floating-point decibels.
@@ -181,8 +191,8 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
     for (unsigned i = 0; i < len; ++i) {
       const float linear_value = src_span[i];
       double db_mag = audio_utilities::LinearToDecibels(linear_value);
-      if (apply_noise && i < AnalyserNoiseCache::kMaxBins) {
-        db_mag += g_analyser_noise.frequency_noise[i];
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins && GetAnalyserNoiseCache().frequency_noise) {
+        db_mag += (*GetAnalyserNoiseCache().frequency_noise)[i];
       }
       dst_span[i] = static_cast<float>(db_mag);
     }
@@ -202,7 +212,7 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
 
   const bool apply_noise = IsAudioNoiseEnabled();
   if (apply_noise) {
-    g_analyser_noise.Initialize();
+    GetAnalyserNoiseCache().Initialize();
   }
 
   // Convert from linear magnitude to unsigned-byte decibels.
@@ -222,8 +232,8 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
     for (unsigned i = 0; i < len; ++i) {
       const float linear_value = src_span[i];
       double db_mag = audio_utilities::LinearToDecibels(linear_value);
-      if (apply_noise && i < AnalyserNoiseCache::kMaxBins) {
-        db_mag += g_analyser_noise.frequency_noise[i];
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins && GetAnalyserNoiseCache().frequency_noise) {
+        db_mag += (*GetAnalyserNoiseCache().frequency_noise)[i];
       }
 
       // The range m_minDecibels to m_maxDecibels will be scaled to byte values
@@ -245,7 +255,7 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
 
   const bool apply_noise = IsAudioNoiseEnabled();
   if (apply_noise) {
-    g_analyser_noise.Initialize();
+    GetAnalyserNoiseCache().Initialize();
   }
 
   const unsigned fft_size = FftSize();
@@ -267,8 +277,8 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
       float value = in_span[(i + write_index - fft_size + kInputBufferSize) %
                        kInputBufferSize];
 
-      if (apply_noise && i < AnalyserNoiseCache::kMaxBins * 2) {
-        value += g_analyser_noise.time_domain_noise[i];
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins * 2 && GetAnalyserNoiseCache().time_domain_noise) {
+        value += (*GetAnalyserNoiseCache().time_domain_noise)[i];
       }
       dst_span[i] = value;
     }
@@ -281,7 +291,7 @@ void RealtimeAnalyser::GetByteTimeDomainData(DOMUint8Array* destination_array) {
 
   const bool apply_noise = IsAudioNoiseEnabled();
   if (apply_noise) {
-    g_analyser_noise.Initialize();
+    GetAnalyserNoiseCache().Initialize();
   }
 
   const unsigned fft_size = FftSize();
@@ -303,8 +313,8 @@ void RealtimeAnalyser::GetByteTimeDomainData(DOMUint8Array* destination_array) {
       float value = in_span[(i + write_index - fft_size + kInputBufferSize) %
                        kInputBufferSize];
 
-      if (apply_noise && i < AnalyserNoiseCache::kMaxBins * 2) {
-        value += g_analyser_noise.time_domain_noise[i];
+      if (apply_noise && i < AnalyserNoiseCache::kMaxBins * 2 && GetAnalyserNoiseCache().time_domain_noise) {
+        value += (*GetAnalyserNoiseCache().time_domain_noise)[i];
       }
 
       // Scale from nominal -1 -> +1 to unsigned byte.

@@ -17,6 +17,7 @@
 #include <random>
 #include <string>
 #include <sstream>
+#include <mutex>
 
 #include "third_party/blink/renderer/platform/privacy_budget/session_noise_cache.h"
 
@@ -73,8 +74,16 @@ struct CachedNoiseValues {
   }
 };
 
-// Global cached noise values - initialized once, used many times
-static CachedNoiseValues g_cached_noise;
+// Intentionally leaked to avoid global constructor/destructor warnings.
+CachedNoiseValues& GetCachedNoise() {
+  static CachedNoiseValues* instance = new CachedNoiseValues();
+  return *instance;
+}
+
+std::once_flag& GetNoiseInitFlag() {
+  static std::once_flag* flag = new std::once_flag();
+  return *flag;
+}
 
 }  // namespace
 
@@ -125,24 +134,28 @@ void DynamicsCompressorHandler::Process(uint32_t frames_to_process) {
   float release = release_->FinalValue();
 
   // Apply fingerprint-based noise only if audio-noise flag is enabled
-  auto* cmd = base::CommandLine::ForCurrentProcess();
-  if (cmd && cmd->HasSwitch("audio-noise")) {
-    // Initialize cached noise values once (thread-safe via flag check)
-    g_cached_noise.Initialize();
+  static const bool audio_noise_enabled = [] {
+    auto* cmd = base::CommandLine::ForCurrentProcess();
+    return cmd && cmd->HasSwitch("audio-noise");
+  }();
+  
+  if (audio_noise_enabled) {
+    // Thread-safe initialization of cached noise values
+    std::call_once(GetNoiseInitFlag(), [] { GetCachedNoise().Initialize(); });
     
     // Detect operation type and apply corresponding cached noise
     bool is_full_buffer_operation = (frames_to_process == GetDeferredTaskHandler().RenderQuantumFrames());
 
     if (is_full_buffer_operation) {
       // Full buffer dynamics compressor - use cached full buffer noise
-      threshold += g_cached_noise.full_buffer_threshold;
-      knee += g_cached_noise.full_buffer_knee;
-      ratio += g_cached_noise.full_buffer_ratio;
+      threshold += GetCachedNoise().full_buffer_threshold;
+      knee += GetCachedNoise().full_buffer_knee;
+      ratio += GetCachedNoise().full_buffer_ratio;
     } else {
       // Standard dynamics compressor - use cached standard noise
-      threshold += g_cached_noise.standard_threshold;
-      knee += g_cached_noise.standard_knee;
-      ratio += g_cached_noise.standard_ratio;
+      threshold += GetCachedNoise().standard_threshold;
+      knee += GetCachedNoise().standard_knee;
+      ratio += GetCachedNoise().standard_ratio;
     }
   }
 

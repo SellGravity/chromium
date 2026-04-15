@@ -33,7 +33,7 @@ namespace {
 // If you need this feature, set both --rects-noise AND --rects-noise-force
 // ==========================================================================
 
-double ApplyRectsMicroNoise(double value) {
+[[maybe_unused]] double ApplyRectsMicroNoise(double value) {
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   
   // DISABLED: Only enable if BOTH flags are set
@@ -104,10 +104,10 @@ DOMRectReadOnly::DOMRectReadOnly(double x,
                                  double y,
                                  double width,
                                  double height)
-    : x_(ApplyRectsMicroNoise(x)),
-      y_(ApplyRectsMicroNoise(y)),
-      width_(ApplyRectsMicroNoise(width)),
-      height_(ApplyRectsMicroNoise(height)) {}
+    : x_(x),
+      y_(y),
+      width_(width),
+      height_(height) {}
 
 gfx::PointF DOMRectReadOnly::Center() const {
   return gfx::PointF(left() + std::fabs(width_) / 2.0,
