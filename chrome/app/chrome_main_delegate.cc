@@ -1139,6 +1139,26 @@ void ChromeMainDelegate::CommonEarlyInitialization() {
         }
       }
 
+      // Compensate window-position: enlarge DIP so physical stays the same
+      // Same logic as window-size: DIP = Physical / DSF
+      if (command_line->HasSwitch("window-position")) {
+        std::string pos_str = command_line->GetSwitchValueASCII("window-position");
+        size_t comma = pos_str.find(',');
+        if (comma != std::string::npos) {
+          int x = 0, y = 0;
+          base::StringToInt(pos_str.substr(0, comma), &x);
+          base::StringToInt(pos_str.substr(comma + 1), &y);
+          int compensated_x = static_cast<int>(x / scale_factor);
+          int compensated_y = static_cast<int>(y / scale_factor);
+
+          mutable_cmd->RemoveSwitch("window-position");
+          mutable_cmd->AppendSwitchASCII(
+              "window-position",
+              base::NumberToString(compensated_x) + "," +
+                  base::NumberToString(compensated_y));
+        }
+      }
+
       // Set device scale factor to zoom out content
       if (!command_line->HasSwitch("force-device-scale-factor")) {
         mutable_cmd->AppendSwitchASCII(

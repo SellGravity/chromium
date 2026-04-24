@@ -378,6 +378,8 @@ source_set("browser_sources") {
     "file_reader.h",
     "granted_file_entry.cc",
     "granted_file_entry.h",
+    "gravity_extension_state_tracker.cc",
+    "gravity_extension_state_tracker.h",
     "host_access_request_helper.cc",
     "host_access_request_helper.h",
     "icon_util.cc",

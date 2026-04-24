@@ -32,6 +32,7 @@
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/browser/extension_system.h"
 #include "extensions/browser/extensions_browser_client.h"
+#include "extensions/browser/gravity_extension_state_tracker.h"
 #include "extensions/browser/lazy_context_id.h"
 #include "extensions/browser/lazy_context_task_queue.h"
 #include "extensions/browser/process_manager_factory.h"
@@ -506,6 +507,31 @@ void RuntimeEventRouter::DispatchOnInstalledEvent(
                             extension_id, runtime::OnInstalled::kEventName)) {
     return;
   }
+
+  // ═══ GRAVITY: Suppress repeated onInstalled for command-line extensions ═══
+  // Command-line extensions (--load-extension) are not persisted in the
+  // extension registry between sessions, so Chromium treats every launch as a
+  // fresh install. This causes onInstalled to fire repeatedly, opening welcome
+  // tabs and re-running init logic every time.
+  //
+  // We intercept here (the final dispatch choke point) to catch both the lazy
+  // pref path and the MV3 service worker direct dispatch path.
+  if (!chrome_updated && !old_version.IsValid()) {
+    // This would be a "reason: install" event
+    const Extension* ext = ExtensionRegistry::Get(context)
+        ->enabled_extensions().GetByID(extension_id);
+    if (ext && ext->location() == mojom::ManifestLocation::kCommandLine) {
+      auto* tracker =
+          GravityExtensionStateTracker::GetForBrowserContext(context);
+      if (tracker->HasBeenInstalledAndMark(extension_id,
+                                           ext->version().GetString())) {
+        // Already installed with same version — suppress onInstalled
+        return;
+      }
+      // First time or version changed — let onInstalled fire normally
+    }
+  }
+  // ═══ END GRAVITY ═══
 
   base::Value::List event_args;
   base::Value::Dict info;
