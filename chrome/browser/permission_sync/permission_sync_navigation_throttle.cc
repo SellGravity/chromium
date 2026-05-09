@@ -165,12 +165,29 @@ PermissionSyncNavigationThrottle::CheckPermission() {
     return PROCEED;
   }
 
-  // ── NO RULES AT ALL → fail-open (ALLOW everything) ──
-  // No startup rules, never synced. Don't block the user.
-  // WS will sync rules in background; once synced, rules will apply.
-  DVLOG(1) << "[PermissionSync] ALLOWED (no rules loaded yet, fail-open): "
-              << url.spec();
-  return PROCEED;
+  // ── NO RULES AT ALL → DEFER (wait for initial sync) ──
+  // Prevents startup URL from bypassing domain blocking.
+  // DEFER until WS sync completes (typically ~1s), then re-evaluate.
+  // Timeout after 3s → fail-open (avoid stuck browser if server offline).
+  //
+  // UX: Browser shows normal loading spinner during DEFER — user sees
+  // the same thing as a slow page load. Only happens once per browser
+  // session (first navigation before first sync).
+  LOG(INFO) << "[PermissionSync] DEFERRED (awaiting initial sync): "
+            << url.spec();
+
+  cache_manager_->RegisterInitialSyncCallback(
+      base::BindOnce(
+          &PermissionSyncNavigationThrottle::OnInitialSyncComplete,
+          weak_factory_.GetWeakPtr()));
+
+  initial_sync_timer_.Start(
+      FROM_HERE, kInitialSyncTimeout,
+      base::BindOnce(
+          &PermissionSyncNavigationThrottle::OnInitialSyncTimeout,
+          base::Unretained(this)));
+
+  return DEFER;
 }
 
 void PermissionSyncNavigationThrottle::OnPermissionDecision(
@@ -485,6 +502,37 @@ std::string PermissionSyncNavigationThrottle::CreateRestrictedPageError(
       "</body>"
       "</html>",
       safe_name.c_str());
+}
+
+void PermissionSyncNavigationThrottle::OnInitialSyncComplete() {
+  initial_sync_timer_.Stop();
+
+  const GURL& url = navigation_handle()->GetURL();
+  std::string domain = ExtractDomainFromURL(url);
+  ResourceType resource_type = GetResourceType(navigation_handle());
+
+  PermissionDecision decision =
+      cache_manager_->EvaluateFromCache(domain, resource_type);
+
+  if (decision.action == PermissionAction::BLOCK) {
+    LOG(INFO) << "[PermissionSync] BLOCKED (after initial sync): "
+              << url.spec() << " | Rule: " << decision.matched_rule_id;
+    CancelDeferredNavigation(
+        ThrottleCheckResult(CANCEL, net::ERR_BLOCKED_BY_ADMINISTRATOR,
+                            CreateBlockedErrorPage(url.spec())));
+  } else {
+    LOG(INFO) << "[PermissionSync] ALLOWED (after initial sync): "
+              << url.spec();
+    Resume();
+  }
+}
+
+void PermissionSyncNavigationThrottle::OnInitialSyncTimeout() {
+  LOG(WARNING) << "[PermissionSync] Initial sync timeout ("
+               << kInitialSyncTimeout.InSeconds()
+               << "s). Fail-open: "
+               << navigation_handle()->GetURL().spec();
+  Resume();
 }
 
 }  // namespace permission_sync

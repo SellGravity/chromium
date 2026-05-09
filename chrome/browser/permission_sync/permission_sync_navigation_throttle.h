@@ -9,6 +9,7 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/timer/timer.h"
 #include "content/public/browser/navigation_throttle.h"
 
 namespace content {
@@ -67,6 +68,12 @@ class PermissionSyncNavigationThrottle : public content::NavigationThrottle {
   // Callback from EvaluateRequestAsync (deferred path only).
   void OnPermissionDecision(PermissionDecision decision);
 
+  // Callback when initial sync completes (startup URL defer path).
+  void OnInitialSyncComplete();
+
+  // Timeout for waiting for initial sync (fail-open after timeout).
+  void OnInitialSyncTimeout();
+
   // Build a blocked error page HTML with XSS-safe URL escaping.
   static std::string CreateBlockedErrorPage(const std::string& url);
 
@@ -74,6 +81,12 @@ class PermissionSyncNavigationThrottle : public content::NavigationThrottle {
   static std::string CreateRestrictedPageError(const std::string& page_name);
 
   const raw_ptr<PermissionCacheManager> cache_manager_;
+
+  // Timer for initial sync timeout. Fires once → fail-open.
+  base::OneShotTimer initial_sync_timer_;
+
+  // Maximum time to wait for initial sync (WS typically completes in ~1s).
+  static constexpr base::TimeDelta kInitialSyncTimeout = base::Seconds(3);
 
   base::WeakPtrFactory<PermissionSyncNavigationThrottle> weak_factory_{this};
 };

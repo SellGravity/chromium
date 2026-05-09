@@ -229,6 +229,22 @@ class PermissionCacheManager : public KeyedService {
   // connection-loss-DISCONNECTED (fail-secure block).
   bool HasEverSynchronized() const;
 
+  // --- Initial Sync Wait (Startup URL fix) ---
+
+  // Callback type for initial sync notification.
+  using InitialSyncCallback = base::OnceClosure;
+
+  // Register a callback to be invoked when the FIRST sync completes.
+  // If already synchronized, callback fires immediately via PostTask.
+  // Used by NavigationThrottle to DEFER startup navigations until
+  // permission rules are available.
+  void RegisterInitialSyncCallback(InitialSyncCallback callback);
+
+  // Returns true if no rules have ever been loaded (no startup rules,
+  // never synced). When true, navigations should DEFER instead of
+  // fail-open to prevent startup URL from bypassing domain blocking.
+  bool IsAwaitingInitialSync() const;
+
   // --- Stats ---
   size_t GetRuleCount() const;
 
@@ -268,6 +284,10 @@ class PermissionCacheManager : public KeyedService {
 
   // Resolves all pending requests with BLOCK (timeout or shutdown).
   void TimeoutPendingRequests();
+
+  // Fires all registered initial sync callbacks.
+  // Called when SYNCHRONIZED is reached for the first time.
+  void DrainInitialSyncCallbacks();
 
   // --- State Validation (FRS Section 4) ---
 
@@ -321,6 +341,13 @@ class PermissionCacheManager : public KeyedService {
   base::Lock pending_lock_;
   std::vector<PendingRequest> pending_requests_ GUARDED_BY(pending_lock_);
   base::OneShotTimer pending_timeout_timer_;
+
+  // --- Initial Sync Callbacks (Startup URL fix) ---
+  // Callbacks waiting for the first sync to complete.
+  // Drained when SYNCHRONIZED is reached for the first time.
+  base::Lock initial_sync_lock_;
+  std::vector<InitialSyncCallback> initial_sync_callbacks_
+      GUARDED_BY(initial_sync_lock_);
 
   // --- WebSocket Client (owned) ---
   std::unique_ptr<PermissionSyncClient> sync_client_;

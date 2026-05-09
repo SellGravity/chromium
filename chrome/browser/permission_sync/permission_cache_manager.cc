@@ -96,6 +96,12 @@ void PermissionCacheManager::Shutdown() {
   }
   connection_state_.store(ConnectionState::DISCONNECTED,
                           std::memory_order_release);
+
+  // Cancel any pending initial sync callbacks.
+  {
+    base::AutoLock lock(initial_sync_lock_);
+    initial_sync_callbacks_.clear();
+  }
 }
 
 // ============================================================================
@@ -117,6 +123,7 @@ void PermissionCacheManager::SetSynchronizedFromStartup() {
   // Drain any requests that might have queued during
   // the brief window between factory creation and this call.
   DrainPendingRequests();
+  DrainInitialSyncCallbacks();
 }
 
 bool PermissionCacheManager::HasStartupRules() const {
@@ -188,6 +195,7 @@ void PermissionCacheManager::SetConnectionState(ConnectionState new_state) {
   if (new_state == ConnectionState::SYNCHRONIZED) {
     has_ever_synchronized_.store(true, std::memory_order_release);
     DrainPendingRequests();
+    DrainInitialSyncCallbacks();
   }
 }
 
@@ -624,6 +632,45 @@ void PermissionCacheManager::TimeoutPendingRequests() {
     decision.reason = "Timeout: sync did not complete within " +
                       std::to_string(kPendingTimeoutSeconds) + "s";
     std::move(request.callback).Run(std::move(decision));
+  }
+}
+
+// ============================================================================
+// Initial Sync Callbacks (Startup URL fix)
+// ============================================================================
+
+void PermissionCacheManager::RegisterInitialSyncCallback(
+    InitialSyncCallback callback) {
+  // Already synchronized → fire immediately via PostTask.
+  if (HasEverSynchronized() || HasStartupRules()) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, std::move(callback));
+    return;
+  }
+
+  base::AutoLock lock(initial_sync_lock_);
+  initial_sync_callbacks_.push_back(std::move(callback));
+  DVLOG(1) << "[PermissionCacheManager] Registered initial sync callback. "
+           << "Pending: " << initial_sync_callbacks_.size();
+}
+
+bool PermissionCacheManager::IsAwaitingInitialSync() const {
+  return !HasEverSynchronized() && !HasStartupRules();
+}
+
+void PermissionCacheManager::DrainInitialSyncCallbacks() {
+  std::vector<InitialSyncCallback> callbacks;
+  {
+    base::AutoLock lock(initial_sync_lock_);
+    callbacks = std::move(initial_sync_callbacks_);
+    initial_sync_callbacks_.clear();
+  }
+  if (!callbacks.empty()) {
+    LOG(INFO) << "[PermissionCacheManager] Firing "
+              << callbacks.size() << " initial sync callbacks";
+    for (auto& cb : callbacks) {
+      std::move(cb).Run();
+    }
   }
 }
 
