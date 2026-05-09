@@ -508,15 +508,31 @@ PermissionDecision PermissionCacheManager::EvaluateAgainstSnapshot(
   // Best match tracking (highest priority rule wins across all lookups).
   const PermissionRule* best_match = nullptr;
 
-  // O(1) exact domain lookup.
-  auto it = snapshot.domain_rules.find(lower_domain);
-  if (it != snapshot.domain_rules.end()) {
-    for (const auto& rule : it->second) {
-      if (!MatchesResourceType(rule, resource_type))
-        continue;
-      if (!best_match || rule.priority > best_match->priority) {
-        best_match = &rule;
+  // O(1) exact domain lookup + parent domain walk.
+  // For "www.facebook.com", checks: "www.facebook.com", "facebook.com"
+  // This ensures rule "facebook.com" also blocks "www.facebook.com",
+  // "m.facebook.com", etc. — standard URL filtering behavior.
+  std::string lookup_domain = lower_domain;
+  while (!lookup_domain.empty()) {
+    auto it = snapshot.domain_rules.find(lookup_domain);
+    if (it != snapshot.domain_rules.end()) {
+      for (const auto& rule : it->second) {
+        if (!MatchesResourceType(rule, resource_type))
+          continue;
+        if (!best_match || rule.priority > best_match->priority) {
+          best_match = &rule;
+        }
       }
+    }
+    // Strip one subdomain level: "www.facebook.com" → "facebook.com"
+    size_t dot_pos = lookup_domain.find('.');
+    if (dot_pos == std::string::npos) {
+      break;  // No more subdomains to strip (e.g., "com")
+    }
+    lookup_domain = lookup_domain.substr(dot_pos + 1);
+    // Stop at TLD (single label like "com" has no dots)
+    if (lookup_domain.find('.') == std::string::npos) {
+      break;
     }
   }
 
