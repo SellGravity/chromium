@@ -7,12 +7,14 @@
 #include <optional>
 
 #include "base/check.h"
+#include "base/command_line.h"
 #include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/lazy_instance.h"
 #include "base/logging.h"
 #include "base/notimplemented.h"
 #include "base/observer_list.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/time/time.h"
 #include "base/unguessable_token.h"
 #include "build/build_config.h"
@@ -837,6 +839,26 @@ display::ScreenInfos RenderWidgetHostViewBase::GetNewScreenInfosForUpdate() {
   // Set system cursor size separately as it's not a property of screen or
   // display.
   screen_infos.system_cursor_size = system_cursor_size_;
+
+  // Fake the screen size if the window-size flag is present
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch("window-size")) {
+    std::string str = command_line->GetSwitchValueASCII("window-size");
+    size_t comma = str.find(',');
+    if (comma != std::string::npos) {
+      int width = 0;
+      int height = 0;
+      if (base::StringToInt(std::string_view(str).substr(0, comma), &width) &&
+          base::StringToInt(std::string_view(str).substr(comma + 1), &height)) {
+        if (width > 0 && height > 0) {
+          for (auto& info : screen_infos.screen_infos) {
+            info.rect.set_size(gfx::Size(width, height));
+            info.available_rect.set_size(gfx::Size(width, height));
+          }
+        }
+      }
+    }
+  }
 
   return screen_infos;
 }

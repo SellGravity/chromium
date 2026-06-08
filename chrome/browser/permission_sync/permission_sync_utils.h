@@ -26,21 +26,7 @@ inline bool IsBlockedChromeURL(const GURL& url) {
   }
 
   std::string_view host = url.host();
-  return host == "version" ||        // Leaks CLI flags, paths, versions
-         host == "flags" ||          // Leaks enabled/disabled feature flags
-         host == "chrome-urls" ||    // Lists ALL chrome:// pages
-         host == "about" ||          // Alias that lists all pages
-         host == "tracing" ||        // Debug/profiling tool
-         host == "net-internals" ||  // Network debugging info
-         host == "gpu" ||            // GPU hardware info
-         host == "system" ||         // System information
-         host == "sandbox" ||        // Sandbox configuration
-         host == "policy" ||         // Applied policies
-         host == "settings" ||       // Browser settings, proxy config
-         host == "extensions" ||     // Installed extensions info
-         // host == "history" ||        // Browsing history (temporarily unblocked)
-         host == "downloads" ||      // Download history
-         host == "components";       // Internal components & versions
+  return host == "version";          // Leaks CLI flags, paths, versions
 }
 
 // Returns true if the URL scheme should bypass permission checks.

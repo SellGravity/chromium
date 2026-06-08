@@ -8,6 +8,8 @@
 
 #include <memory>
 
+#include "base/command_line.h"
+
 #include "chrome/browser/ui/frame/window_frame_util.h"
 #include "chrome/browser/ui/views/frame/browser_frame_view_win.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
@@ -51,8 +53,15 @@ BrowserCaptionButtonContainer::BrowserCaptionButtonContainer(
           VIEW_ID_MINIMIZE_BUTTON,
           IDS_APP_ACCNAME_MINIMIZE))),
       maximize_button_(AddChildView(CreateCaptionButton(
-          base::BindRepeating(&BrowserWidget::Maximize,
-                              base::Unretained(frame_view_->browser_widget())),
+          base::BindRepeating(
+              [](views::Widget* widget) {
+                if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+                        "ash-host-window-bounds")) {
+                  return;
+                }
+                widget->Maximize();
+              },
+              frame_view_->browser_widget()),
           frame_view_,
           VIEW_ID_MAXIMIZE_BUTTON,
           IDS_APP_ACCNAME_MAXIMIZE))),

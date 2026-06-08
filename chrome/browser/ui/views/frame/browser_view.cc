@@ -2017,6 +2017,9 @@ bool BrowserView::IsMinimized() const {
 }
 
 void BrowserView::Maximize() {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("ash-host-window-bounds")) {
+    return;
+  }
   browser_widget_->Maximize();
 }
 
@@ -3673,6 +3676,9 @@ bool BrowserView::GetAcceleratorForCommandId(
 // BrowserView, views::WidgetDelegate implementation:
 
 bool BrowserView::CanResize() const {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("ash-host-window-bounds")) {
+    return false;
+  }
   return WidgetDelegate::CanResize() &&
          GetWebApiWindowResizable().value_or(true);
 }
@@ -4139,6 +4145,12 @@ ui::ImageModel BrowserView::GetWindowIcon() {
 }
 
 bool BrowserView::ExecuteWindowsCommand(int command_id) {
+  // Intercept SC_MAXIMIZE (0xF030) if we are locking the window bounds.
+  if ((command_id & 0xFFF0) == 0xF030 &&
+      base::CommandLine::ForCurrentProcess()->HasSwitch("ash-host-window-bounds")) {
+    return true;
+  }
+
   // Translate WM_APPCOMMAND command ids into a command id that the browser
   // knows how to handle.
   int command_id_from_app_command = GetCommandIDForAppCommandID(command_id);

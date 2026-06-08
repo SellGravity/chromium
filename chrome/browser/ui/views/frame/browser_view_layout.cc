@@ -7,6 +7,7 @@
 #include <algorithm>
 
 #include "base/check_is_test.h"
+#include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/i18n/rtl.h"
 #include "base/memory/raw_ptr.h"
@@ -14,6 +15,7 @@
 #include "base/numerics/safe_math.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/trace_event/common/trace_event_common.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
@@ -24,6 +26,7 @@
 #include "chrome/browser/ui/find_bar/find_bar.h"
 #include "chrome/browser/ui/find_bar/find_bar_controller.h"
 #include "chrome/browser/ui/layout_constants.h"
+#include "chrome/common/chrome_switches.h"
 #include "chrome/browser/ui/tabs/features.h"
 #include "chrome/browser/ui/tabs/vertical_tab_strip_state_controller.h"
 #include "chrome/browser/ui/ui_features.h"
@@ -72,6 +75,24 @@ namespace {
 // The number of pixels the constrained window should overlap the bottom
 // of the omnibox.
 const int kConstrainedWindowOverlap = 3;
+
+int GetMainBrowserContentsMinimumWidth() {
+  int min_width = BrowserViewLayout::kMainBrowserContentsMinimumWidth;
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch(switches::kWindowSize)) {
+    std::string str = command_line->GetSwitchValueASCII(switches::kWindowSize);
+    size_t comma = str.find(',');
+    if (comma != std::string::npos) {
+      int width = 0;
+      if (base::StringToInt(std::string_view(str).substr(0, comma), &width)) {
+        if (width > 0 && width < min_width) {
+          min_width = width;
+        }
+      }
+    }
+  }
+  return min_width;
+}
 
 bool ShouldUseBrowserContentMinimumSize(Browser* browser) {
   if (!browser) {
@@ -416,7 +437,7 @@ gfx::Size BrowserViewLayoutImplOld::GetMinimumSize(
 
   gfx::Size contents_size(views().contents_container->GetMinimumSize());
   contents_size.SetToMax(use_browser_content_minimum_size_
-                             ? gfx::Size(kMainBrowserContentsMinimumWidth,
+                             ? gfx::Size(GetMainBrowserContentsMinimumWidth(),
                                          kMainBrowserContentsMinimumHeight)
                              : kContentsMinimumSize);
 
@@ -940,7 +961,7 @@ void BrowserViewLayoutImplOld::UpdateTopContainerBounds(
 
 int BrowserViewLayoutImplOld::GetMinWebContentsWidth() const {
   int min_width =
-      kMainBrowserContentsMinimumWidth -
+      GetMainBrowserContentsMinimumWidth() -
       views().contents_height_side_panel->GetMinimumSize().width() -
       (views().right_aligned_side_panel_separator
            ? views()
