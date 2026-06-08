@@ -3676,7 +3676,9 @@ bool BrowserView::GetAcceleratorForCommandId(
 // BrowserView, views::WidgetDelegate implementation:
 
 bool BrowserView::CanResize() const {
-  if (base::CommandLine::ForCurrentProcess()->HasSwitch("ash-host-window-bounds")) {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch("lock-window-size") &&
+      command_line->GetSwitchValueASCII("device-mode") == "window") {
     return false;
   }
   return WidgetDelegate::CanResize() &&
@@ -3689,6 +3691,11 @@ bool BrowserView::CanFullscreen() const {
 }
 
 bool BrowserView::CanMaximize() const {
+  auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line->HasSwitch("lock-window-size") &&
+      command_line->GetSwitchValueASCII("device-mode") == "window") {
+    return false;
+  }
   return WidgetDelegate::CanMaximize() &&
          GetWebApiWindowResizable().value_or(true);
 }

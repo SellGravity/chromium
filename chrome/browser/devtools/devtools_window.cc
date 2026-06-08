@@ -13,6 +13,7 @@
 #include "base/base64.h"
 #include "base/command_line.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/json/json_reader.h"
 #include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_functions.h"
@@ -599,6 +600,21 @@ content::WebContents* DevToolsWindow::GetInTabWebContents(
 }
 
 // static
+bool DevToolsWindow::IsAutoOpenedInPhoneMode(
+    content::WebContents* inspected_web_contents) {
+  if (base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+          "device-mode") != "phone") {
+    return false;
+  }
+  DevToolsWindow* window =
+      GetInstanceForInspectedWebContents(inspected_web_contents);
+  if (!window) {
+    return false;
+  }
+  return window->opened_by_ == DevToolsOpenedByAction::kAutomaticForNewTarget;
+}
+
+// static
 DevToolsWindow* DevToolsWindow::GetInstanceForInspectedWebContents(
     WebContents* inspected_web_contents) {
   if (!inspected_web_contents) {
@@ -883,22 +899,35 @@ void DevToolsWindow::ToggleDevToolsWindow(
   if (!window->is_docked_ || do_open) {
     window->ScheduleShow(action);
   } else {
-    DevToolsClosedByAction closed_by;
-    switch (toggled_by) {
-      case DevToolsOpenedByAction::kMainMenuOrMainShortcut:
-        closed_by = DevToolsClosedByAction::kMainMenuOrMainShortcut;
-        break;
-      case DevToolsOpenedByAction::kToggleShortcut:
-        closed_by = DevToolsClosedByAction::kToggleShortcut;
-        break;
-      case DevToolsOpenedByAction::kPinnedToolbarButton:
-        closed_by = DevToolsClosedByAction::kPinnedToolbarButton;
-        break;
-      default:
-        closed_by = DevToolsClosedByAction::kUnknown;
-        break;
+    if (IsAutoOpenedInPhoneMode(inspected_web_contents)) {
+      window->main_web_contents_->GetPrimaryMainFrame()->ExecuteJavaScript(
+          u"if (window.Emulation && window.Emulation.AdvancedApp) {"
+          u"  const app = window.Emulation.AdvancedApp.instance();"
+          u"  if (app.rootSplitWidget.showMode() === 'Both') {"
+          u"    app.rootSplitWidget.hideSidebar();"
+          u"  } else {"
+          u"    app.rootSplitWidget.showBoth();"
+          u"  }"
+          u"}",
+          base::DoNothing());
+    } else {
+      DevToolsClosedByAction closed_by;
+      switch (toggled_by) {
+        case DevToolsOpenedByAction::kMainMenuOrMainShortcut:
+          closed_by = DevToolsClosedByAction::kMainMenuOrMainShortcut;
+          break;
+        case DevToolsOpenedByAction::kToggleShortcut:
+          closed_by = DevToolsClosedByAction::kToggleShortcut;
+          break;
+        case DevToolsOpenedByAction::kPinnedToolbarButton:
+          closed_by = DevToolsClosedByAction::kPinnedToolbarButton;
+          break;
+        default:
+          closed_by = DevToolsClosedByAction::kUnknown;
+          break;
+      }
+      window->Close(closed_by);
     }
-    window->Close(closed_by);
   }
 }
 
@@ -1356,6 +1385,13 @@ GURL DevToolsWindow::GetDevToolsURL(Profile* profile,
 #if BUILDFLAG(CHROME_FOR_TESTING)
   url += "&isChromeForTesting=true";
 #endif
+
+  if (base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("device-mode") == "phone") {
+    url += "&fakeDeviceMode=true";
+    if (base::CommandLine::ForCurrentProcess()->HasSwitch("device-size")) {
+      url += "&fakeWindowSize=" + base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("device-size");
+    }
+  }
 
   return DevToolsUIBindings::SanitizeFrontendURL(GURL(url));
 }

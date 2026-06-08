@@ -131,6 +131,12 @@ class DevToolsWindow : public DevToolsUIBindings::Delegate,
   static DevToolsWindow* AsDevToolsWindow(BrowserWindowInterface* browser);
   static DevToolsWindow* FindDevToolsWindow(content::DevToolsAgentHost*);
 
+  // Returns true if a DevTools window exists for |inspected_web_contents|, was
+  // auto-opened via --auto-open-devtools-for-tabs triggered by --device-mode=phone,
+  // and has NOT yet been explicitly opened by the user.
+  static bool IsAutoOpenedInPhoneMode(
+      content::WebContents* inspected_web_contents);
+
   // Open or reveal DevTools window, and perform the specified action.
   // How to get pointer to the created window see comments for
   // ToggleDevToolsWindow().

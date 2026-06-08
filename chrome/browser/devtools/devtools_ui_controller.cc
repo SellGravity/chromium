@@ -4,6 +4,7 @@
 
 #include "chrome/browser/devtools/devtools_ui_controller.h"
 
+#include "base/command_line.h"
 #include "chrome/browser/devtools/devtools_contents_resizing_strategy.h"
 #include "chrome/browser/devtools/devtools_window.h"
 #include "chrome/browser/ui/views/frame/contents_container_view.h"

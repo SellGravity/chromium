@@ -461,6 +461,15 @@ std::string SanitizeFrontendQueryParam(const std::string& key,
     return value;
   }
 
+  // Allow device-mode emulation parameters passed via --device-mode=phone.
+  if (key == "fakeDeviceMode" && value == "true") {
+    return value;
+  }
+
+  if (key == "fakeWindowSize") {
+    return value;
+  }
+
   return std::string();
 }
 

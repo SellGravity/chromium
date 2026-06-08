@@ -1710,7 +1710,8 @@ int ChromeBrowserMainParts::PreMainMessageLoopRunImpl() {
   // before WebUI for the CrOS login that can be called inside PostProfileInit
   g_browser_process->CreateDevToolsProtocolHandler();
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          ::switches::kAutoOpenDevToolsForTabs))
+          ::switches::kAutoOpenDevToolsForTabs) ||
+      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("device-mode") == "phone")
     g_browser_process->CreateDevToolsAutoOpener();
 
   // Needs to be done before PostProfileInit, since the SODA Installer setup is
