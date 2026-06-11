@@ -151,6 +151,8 @@ namespace blink {
 
 namespace {
 
+
+
 const char kSignalingStateClosedMessage[] =
     "The RTCPeerConnection's signalingState is 'closed'.";
 const char kModifiedSdpMessage[] =
@@ -1001,6 +1003,9 @@ ScriptPromise<IDLUndefined> RTCPeerConnection::setLocalDescription(
         break;
     }
   }
+  
+
+  
   ParsedSessionDescription parsed_sdp = ParsedSessionDescription::Parse(
       session_description_init->type().AsString(), sdp);
   if (session_description_init->type() != V8RTCSdpType::Enum::kRollback) {
@@ -1055,6 +1060,9 @@ ScriptPromise<IDLUndefined> RTCPeerConnection::setLocalDescription(
         break;
     }
   }
+  
+
+  
   ParsedSessionDescription parsed_sdp = ParsedSessionDescription::Parse(
       session_description_init->hasType()
           ? session_description_init->type().AsString()
@@ -2366,40 +2374,7 @@ void RTCPeerConnection::DidChangeSessionDescriptions(
   DCHECK(!closed_);
   DCHECK(GetExecutionContext()->IsContextThread());
 
-  // WebRTC "Base on IP Proxy": Replace real IPs in local description SDPs
-  // so that pc.localDescription.sdp does not leak the real IP.
-  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (command_line && command_line->HasSwitch("webrtc-proxy-ip")) {
-    std::string proxy_ip =
-        command_line->GetSwitchValueASCII("webrtc-proxy-ip");
-    if (!proxy_ip.empty()) {
-      std::regex ip_regex(
-          "(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})");
-      auto replace_ips = [&](RTCSessionDescriptionPlatform* desc) {
-        if (!desc) return;
-        std::string sdp_str = desc->Sdp().Utf8();
-        std::string result;
-        std::sregex_iterator it(sdp_str.begin(), sdp_str.end(), ip_regex);
-        std::sregex_iterator end;
-        size_t last_pos = 0;
-        for (; it != end; ++it) {
-          const std::smatch& match = *it;
-          std::string ip = match[1].str();
-          result += sdp_str.substr(last_pos, match.position() - last_pos);
-          if (ip == "0.0.0.0" || ip == "127.0.0.1") {
-            result += ip;
-          } else {
-            result += proxy_ip;
-          }
-          last_pos = match.position() + match.length();
-        }
-        result += sdp_str.substr(last_pos);
-        desc->SetSdp(String::FromUTF8(result));
-      };
-      replace_ips(pending_local_description);
-      replace_ips(current_local_description);
-    }
-  }
+
 
   pending_local_description_ =
       pending_local_description

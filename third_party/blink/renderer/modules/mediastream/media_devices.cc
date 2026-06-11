@@ -1379,13 +1379,33 @@ void MediaDevices::DevicesEnumerated(
       counts[1],  // kMediaAudioOutput ← audio_out
     };
 
-    const std::array<const char*, 3> labels = {"Microphone", "Camera", "Speaker"};
+    const std::array<const char*, 6> kSpoofedCameraNames = {
+        "Logitech HD Pro Webcam C920",
+        "Integrated Camera",
+        "FaceTime HD Camera (Built-in)",
+        "OBS Virtual Camera",
+        "HP TrueVision HD Camera",
+        "USB Video Device"
+    };
+    
     spoofed_enumeration.resize(3);
     for (int i = 0; i < 3; i++) {
       for (int j = 0; j < device_counts[i]; j++) {
         std::string id = base::Uuid::GenerateRandomV4().AsLowercaseString();
         std::string group = base::Uuid::GenerateRandomV4().AsLowercaseString();
-        std::string lbl = std::string(labels[i]) + " " + base::NumberToString(j + 1);
+        std::string lbl;
+        
+        if (i == 0) { // Microphone
+          lbl = "Microphone (Realtek High Definition Audio)";
+          if (j > 0) lbl += " " + base::NumberToString(j + 1);
+        } else if (i == 1) { // Camera
+          size_t name_index = static_cast<size_t>(j) % kSpoofedCameraNames.size();
+          lbl = kSpoofedCameraNames[name_index];
+        } else { // Speaker
+          lbl = "Speakers (Realtek High Definition Audio)";
+          if (j > 0) lbl += " " + base::NumberToString(j + 1);
+        }
+        
         spoofed_enumeration[i].push_back(WebMediaDeviceInfo(id, lbl, group));
       }
     }

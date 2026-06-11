@@ -117,6 +117,112 @@ namespace {
 // so treat as append-only.
 enum class RtcpMux { kDisabled, kEnabled, kNoMedia, kMax };
 
+static std::string NormalizeProxyIp(const std::string& proxy_ip_raw) {
+  std::string pure_ip = proxy_ip_raw;
+  size_t prefix_pos = pure_ip.find("://");
+  if (prefix_pos != std::string::npos) {
+    pure_ip = pure_ip.substr(prefix_pos + 3);
+  }
+  if (!pure_ip.empty() && pure_ip.front() == '[') {
+    size_t close_bracket = pure_ip.find(']');
+    if (close_bracket != std::string::npos) {
+      pure_ip = pure_ip.substr(1, close_bracket - 1);
+    }
+  } else {
+    size_t last_colon = pure_ip.rfind(':');
+    if (last_colon != std::string::npos) {
+      if (std::count(pure_ip.begin(), pure_ip.end(), ':') == 1) {
+        pure_ip = pure_ip.substr(0, last_colon);
+      }
+    }
+  }
+  return pure_ip;
+}
+
+static String SanitizeSdp(const String& sdp, const std::string& proxy_ip_raw) {
+  std::string sdp_str = sdp.Utf8();
+  if (proxy_ip_raw.empty()) return sdp;
+
+  std::string proxy_ip = NormalizeProxyIp(proxy_ip_raw);
+  bool is_ipv6 = proxy_ip.find(':') != std::string::npos;
+
+  std::string result;
+  size_t start = 0;
+  while (start < sdp_str.length()) {
+    size_t end = sdp_str.find('\n', start);
+    std::string line = (end == std::string::npos) ? sdp_str.substr(start) : sdp_str.substr(start, end - start);
+
+    bool has_cr = false;
+    if (!line.empty() && line.back() == '\r') {
+      has_cr = true;
+      line.pop_back();
+    }
+
+    if (line.rfind("c=IN IP4 ", 0) == 0 || line.rfind("c=IN IP6 ", 0) == 0) {
+      line = (is_ipv6 ? "c=IN IP6 " : "c=IN IP4 ") + proxy_ip;
+    } else if (line.rfind("a=candidate:", 0) == 0 || line.rfind("candidate:", 0) == 0) {
+      std::vector<std::string> parts;
+      size_t pos = 0;
+      while (pos < line.length()) {
+        size_t space = line.find(' ', pos);
+        if (space == std::string::npos) {
+          parts.push_back(line.substr(pos));
+          break;
+        }
+        parts.push_back(line.substr(pos, space - pos));
+        pos = space + 1;
+      }
+
+      if (parts.size() >= 8) {
+        std::string ip = parts[4];
+        if (ip.find(".local") == std::string::npos && 
+            ip != "0.0.0.0" && ip != "127.0.0.1" && ip != "::") {
+          parts[4] = proxy_ip;
+          if (parts.size() >= 8 && parts[6] == "typ") {
+            parts[7] = "srflx";
+            if (parts.size() >= 12 && parts[8] == "raddr") {
+              parts[9] = is_ipv6 ? "::" : "0.0.0.0";
+              parts[11] = "0";
+            } else if (parts.size() == 8) {
+              parts.push_back("raddr");
+              parts.push_back(is_ipv6 ? "::" : "0.0.0.0");
+              parts.push_back("rport");
+              parts.push_back("0");
+            } else if (parts.size() > 8) {
+              auto it = std::find(parts.begin(), parts.end(), "typ");
+              if (it != parts.end() && (it + 1) != parts.end()) {
+                auto raddr_it = std::find(parts.begin(), parts.end(), "raddr");
+                if (raddr_it != parts.end() && (raddr_it + 1) != parts.end()) {
+                  *(raddr_it + 1) = is_ipv6 ? "::" : "0.0.0.0";
+                } else {
+                  parts.insert(it + 2, { "raddr", is_ipv6 ? "::" : "0.0.0.0", "rport", "0" });
+                }
+                auto rport_it = std::find(parts.begin(), parts.end(), "rport");
+                if (rport_it != parts.end() && (rport_it + 1) != parts.end()) {
+                  *(rport_it + 1) = "0";
+                }
+              }
+            }
+          }
+        }
+        line = parts[0];
+        for (size_t i = 1; i < parts.size(); ++i) {
+          line += " " + parts[i];
+        }
+      }
+    }
+
+    result += line;
+    if (has_cr) result += "\r";
+    if (end != std::string::npos) result += "\n";
+    
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+
+  return String::FromUTF8(result);
+}
+
 RTCSessionDescriptionPlatform* CreateWebKitSessionDescription(
     const std::string& sdp,
     const std::string& type) {
@@ -137,7 +243,17 @@ RTCSessionDescriptionPlatform* CreateWebKitSessionDescription(
     return nullptr;
   }
 
-  return CreateWebKitSessionDescription(sdp, native_desc->type());
+  String sdp_str = String::FromUTF8(sdp);
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  if (command_line && command_line->HasSwitch("webrtc-proxy-ip")) {
+    std::string proxy_ip =
+        command_line->GetSwitchValueASCII("webrtc-proxy-ip");
+    if (!proxy_ip.empty()) {
+      sdp_str = SanitizeSdp(sdp_str, proxy_ip);
+    }
+  }
+
+  return CreateWebKitSessionDescription(sdp_str.Utf8(), native_desc->type());
 }
 
 void RunClosureWithTrace(CrossThreadOnceClosure closure,
@@ -2051,62 +2167,6 @@ void RTCPeerConnectionHandler::OnDataChannel(
     client_->DidAddRemoteDataChannel(std::move(channel));
 }
 
-// Replace IP addresses in ICE candidate SDP string with proxy IP.
-// ICE candidate format: "candidate:... <IP> <port> typ <type> ..."
-// This prevents WebRTC from leaking the real IP when using a proxy.
-// Handles BOTH IPv4 and IPv6 addresses.
-static String ReplaceIpInCandidate(const String& sdp,
-                                   const std::string& proxy_ip) {
-  std::string sdp_str = sdp.Utf8();
-
-  // Step 1: Replace IPv6 addresses first (more specific pattern).
-  // IPv6 format: groups of hex digits separated by colons, possibly with ::
-  // Example: 2001:ee0:4b42:4cb0:1697:9782:5ac4:3f1b
-  std::regex ipv6_regex(
-      "([0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{0,4}){2,7})");
-  std::string result_v6;
-  std::sregex_iterator it_v6(sdp_str.begin(), sdp_str.end(), ipv6_regex);
-  std::sregex_iterator end_v6;
-  size_t last_pos_v6 = 0;
-
-  for (; it_v6 != end_v6; ++it_v6) {
-    const std::smatch& match = *it_v6;
-    std::string ip = match[1].str();
-    result_v6 += sdp_str.substr(last_pos_v6, match.position() - last_pos_v6);
-    // Skip loopback IPv6
-    if (ip == "::1" || ip == "0:0:0:0:0:0:0:1") {
-      result_v6 += ip;
-    } else {
-      result_v6 += proxy_ip;
-    }
-    last_pos_v6 = match.position() + match.length();
-  }
-  result_v6 += sdp_str.substr(last_pos_v6);
-
-  // Step 2: Replace IPv4 addresses.
-  std::regex ipv4_regex(
-      "(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})");
-  std::string result;
-  std::sregex_iterator it(result_v6.begin(), result_v6.end(), ipv4_regex);
-  std::sregex_iterator end;
-  size_t last_pos = 0;
-
-  for (; it != end; ++it) {
-    const std::smatch& match = *it;
-    std::string ip = match[1].str();
-    result += result_v6.substr(last_pos, match.position() - last_pos);
-    // Skip localhost, unspecified, and private addresses
-    if (ip == "0.0.0.0" || ip == "127.0.0.1") {
-      result += ip;
-    } else {
-      result += proxy_ip;
-    }
-    last_pos = match.position() + match.length();
-  }
-  result += result_v6.substr(last_pos);
-  return String::FromUTF8(result);
-}
-
 void RTCPeerConnectionHandler::OnIceCandidate(const String& sdp,
                                                const String& sdp_mid,
                                                int sdp_mline_index,
@@ -2132,7 +2192,7 @@ void RTCPeerConnectionHandler::OnIceCandidate(const String& sdp,
     std::string proxy_ip =
         command_line->GetSwitchValueASCII("webrtc-proxy-ip");
     if (!proxy_ip.empty()) {
-      modified_sdp = ReplaceIpInCandidate(sdp, proxy_ip);
+      modified_sdp = SanitizeSdp(sdp, proxy_ip);
     }
   }
 

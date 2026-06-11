@@ -37,16 +37,32 @@ std::unique_ptr<VideoCaptureDeviceFactory>
 CreateFakeVideoCaptureDeviceFactory() {
   const base::CommandLine* command_line =
       base::CommandLine::ForCurrentProcess();
-  // Use a File Video Device Factory if the command line flag is present.
-  // Otherwise, use a Fake Video Device Factory.
   if (command_line->HasSwitch(switches::kUseFileForFakeVideoCapture)) {
     return std::make_unique<FileVideoCaptureDeviceFactory>();
   } else {
+    std::string fake_options = command_line->GetSwitchValueASCII(
+        switches::kUseFakeDeviceForMediaStream);
+    if (command_line->HasSwitch("media-device-count")) {
+      std::string count_str = command_line->GetSwitchValueASCII("media-device-count");
+      // Format is A,B,C where C is the number of webcams.
+      std::string video_count = "1";
+      size_t pos1 = count_str.find(',');
+      if (pos1 != std::string::npos) {
+        size_t pos2 = count_str.find(',', pos1 + 1);
+        if (pos2 != std::string::npos) {
+          video_count = count_str.substr(pos2 + 1);
+        }
+      } else if (!count_str.empty()) {
+        video_count = count_str; // Fallback if only 1 number is passed
+      }
+
+      if (!fake_options.empty()) fake_options += ",";
+      fake_options += "device-count=" + video_count;
+    }
+
     std::vector<FakeVideoCaptureDeviceSettings> config;
     FakeVideoCaptureDeviceFactory::ParseFakeDevicesConfigFromOptionsString(
-        command_line->GetSwitchValueASCII(
-            switches::kUseFakeDeviceForMediaStream),
-        &config);
+        fake_options, &config);
     auto result = std::make_unique<FakeVideoCaptureDeviceFactory>();
     result->SetToCustomDevicesConfig(config);
     return std::move(result);
@@ -85,9 +101,9 @@ CreatePlatformSpecificVideoCaptureDeviceFactory(
 }  // anonymous namespace
 
 bool ShouldUseFakeVideoCaptureDeviceFactory() {
-  const base::CommandLine* command_line =
-      base::CommandLine::ForCurrentProcess();
-  return command_line->HasSwitch(switches::kUseFakeDeviceForMediaStream);
+  // FAKE DEVICE INJECTION (REPLACE METHOD)
+  // Always use FakeVideoCaptureDeviceFactory to spoof video stream.
+  return true;
 }
 
 std::unique_ptr<VideoCaptureDeviceFactory> CreateVideoCaptureDeviceFactory(

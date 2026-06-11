@@ -324,7 +324,7 @@ void WebRtcLoggingController::GrantLogsDirectoryAccess(
     const base::FilePath& logs_path) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (logs_path.empty()) {
-    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(icd
         FROM_HERE, base::BindOnce(std::move(error_callback),
                                   "Logs directory not available"));
     return;

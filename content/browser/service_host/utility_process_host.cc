@@ -413,6 +413,7 @@ bool UtilityProcessHost::StartProcess() {
       switches::kUseFakeMjpegDecodeAccelerator,
       switches::kUseFileForFakeVideoCapture,
       switches::kUseMockCertVerifierForTesting,
+      "media-device-count",
       switches::kMockCertVerifierDefaultResultForTesting,
       switches::kUtilityStartupDialog,
       switches::kUseANGLE,

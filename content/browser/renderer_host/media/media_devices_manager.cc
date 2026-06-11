@@ -594,6 +594,9 @@ void MediaDevicesManager::EnumerateDevices(
     const BoolDeviceTypes& requested_types,
     EnumerationCallback callback) {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
+
+
+
   bool start_audio_monitoring =
       requested_types[static_cast<size_t>(MediaDeviceType::kMediaAudioInput)] ||
       requested_types[static_cast<size_t>(MediaDeviceType::kMediaAudioOutput)];
@@ -1346,10 +1349,25 @@ void MediaDevicesManager::DevicesEnumerated(
     const blink::WebMediaDeviceInfoArray& snapshot) {
   DCHECK_CURRENTLY_ON(BrowserThread::IO);
   DCHECK(blink::IsValidMediaDeviceType(type));
-  UpdateSnapshot(type, snapshot);
+
+  // FAKE DEVICE NAME INJECTION FOR AUDIO
+  blink::WebMediaDeviceInfoArray modified_snapshot = snapshot;
+  if (use_fake_devices_) {
+    if (type == MediaDeviceType::kMediaAudioInput) {
+      for (auto& device : modified_snapshot) {
+        device.label = "Microphone (Realtek High Definition Audio)";
+      }
+    } else if (type == MediaDeviceType::kMediaAudioOutput) {
+      for (auto& device : modified_snapshot) {
+        device.label = "Speakers (Realtek High Definition Audio)";
+      }
+    }
+  }
+
+  UpdateSnapshot(type, modified_snapshot);
   cache_infos_[static_cast<size_t>(type)].UpdateCompleted();
   cache_is_populated_[static_cast<size_t>(type)] = true;
-  SendLogMessage(GetDevicesEnumeratedLogString(type, snapshot));
+  SendLogMessage(GetDevicesEnumeratedLogString(type, modified_snapshot));
 
   if (cache_policies_[static_cast<size_t>(type)] == CachePolicy::NO_CACHE) {
     for (auto& request : client_requests_) {

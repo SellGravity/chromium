@@ -244,8 +244,20 @@ void FakeVideoCaptureDeviceFactory::GetDevicesInfo(
 #error Unsupported platform
 #endif
 
+    // FAKE DEVICE NAME INJECTION
+    constexpr std::array<const char*, 6> kSpoofedCameraNames = {{
+        "Logitech HD Pro Webcam C920",
+        "Integrated Camera",
+        "FaceTime HD Camera (Built-in)",
+        "OBS Virtual Camera",
+        "HP TrueVision HD Camera",
+        "USB Video Device"
+    }};
+    size_t spoofed_name_index = static_cast<size_t>(entry_index) % kSpoofedCameraNames.size();
+    std::string display_name = kSpoofedCameraNames.at(spoofed_name_index);
+
     devices_info.emplace_back(VideoCaptureDeviceDescriptor(
-        base::StringPrintf("fake_device_%d", entry_index), entry.device_id,
+        display_name, entry.device_id,
         /*model_id=*/std::string(), api,
         entry.photo_device_config.control_support,
         VideoCaptureTransportType::OTHER_TRANSPORT,
