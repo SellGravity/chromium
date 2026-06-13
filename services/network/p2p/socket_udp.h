@@ -72,7 +72,8 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) P2PSocketUdp : public P2PSocket {
                const net::NetworkTrafficAnnotationTag& traffic_annotation,
                net::NetLog* net_log,
                const DatagramServerSocketFactory& socket_factory,
-               std::optional<base::UnguessableToken> devtools_token);
+               std::optional<base::UnguessableToken> devtools_token,
+               bool is_socks5_tunnel = false);
   P2PSocketUdp(Delegate* delegate,
                mojo::PendingRemote<mojom::P2PSocketClient> client,
                mojo::PendingReceiver<mojom::P2PSocket> socket,
@@ -110,6 +111,11 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) P2PSocketUdp : public P2PSocket {
   void DoRead();
   void OnRecv(int result);
   void MaybeDrainReceivedPackets(bool force);
+
+  // Called when Socks5UdpTunnel async handshake completes.
+  void OnListenDone(const P2PHostAndIPEndPoint& remote_address, int result);
+  // Common post-Listen initialization (buffer setup, SocketCreated, DoRead).
+  void FinishInit(const P2PHostAndIPEndPoint& remote_address);
 
   // Following 3 methods return false if the result was an error and the socket
   // was destroyed. The caller should stop using |this| in that case.
@@ -168,6 +174,11 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) P2PSocketUdp : public P2PSocket {
 
   // Container for batching send completions.
   std::vector<::network::P2PSendPacketMetrics> send_completions_;
+
+  // Set to true if the socket_factory_ produces a Socks5UdpTunnel.
+  bool is_socks5_tunnel_ = false;
+
+  base::WeakPtrFactory<P2PSocketUdp> weak_ptr_factory_{this};
 };
 
 }  // namespace network

@@ -734,6 +734,9 @@ const char kWebRtcRemoteEventLogUploadNoSuppression[] =
 // handling policy is specified in Preferences.
 const char kWebRtcIPHandlingPolicy[] = "webrtc-ip-handling-policy";
 
+// Select the internal WebRTC mode used by Gravity.
+const char kWebRtcMode[] = "webrtc-mode";
+
 // Specify the initial window user title: --window-name="My custom title"
 const char kWindowName[] = "window-name";
 

@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
@@ -80,6 +81,7 @@
 #include "third_party/blink/renderer/platform/p2p/mdns_responder_adapter.h"
 #include "third_party/blink/renderer/platform/p2p/port_allocator.h"
 #include "third_party/blink/renderer/platform/p2p/socket_dispatcher.h"
+#include "third_party/webrtc/p2p/base/port_allocator.h"
 #include "third_party/blink/renderer/platform/peerconnection/audio_codec_factory.h"
 #include "third_party/blink/renderer/platform/peerconnection/video_codec_factory.h"
 #include "third_party/blink/renderer/platform/peerconnection/vsync_provider.h"
@@ -118,6 +120,62 @@ struct CrossThreadCopier<base::RepeatingCallback<void(base::TimeDelta)>>
 namespace {
 
 using PassKey = base::PassKey<PeerConnectionDependencyFactory>;
+
+constexpr char kWebRtcModeSwitch[] = "webrtc-mode";
+constexpr char kWebRtcProxyIpSwitch[] = "webrtc-proxy-ip";
+constexpr char kWebRtcModeDisabled[] = "disabled";
+constexpr char kWebRtcModeForwardUdp[] = "forward_udp";
+
+enum class WebRtcMode {
+  kDefault,
+  kDisabled,
+  kForwardUdp,
+};
+
+WebRtcMode GetWebRtcMode(const base::CommandLine& command_line) {
+  const std::string mode =
+      command_line.GetSwitchValueASCII(kWebRtcModeSwitch);
+  if (mode == kWebRtcModeDisabled || mode == "disable") {
+    return WebRtcMode::kDisabled;
+  }
+  if (mode == kWebRtcModeForwardUdp) {
+    return WebRtcMode::kForwardUdp;
+  }
+  return WebRtcMode::kDefault;
+}
+
+// AlwaysAllowMediaPermission: used by Soft Disable to FORCE network enumeration.
+// By pretending we have media permission, FilteringNetworkManager will enumerate
+// real local IPs (e.g. 192.168.x.x). Then libwebrtc's mDNS obfuscator will kick
+// in and hash these into safe "xxx.local" candidates. This prevents the SDP from
+// being totally empty (which is a fingerprintable trait) while keeping the real
+// local IP hidden. STUN/Relay are blocked separately via port_allocator flags.
+class AlwaysAllowMediaPermission : public media::MediaPermission {
+ public:
+  AlwaysAllowMediaPermission() = default;
+  ~AlwaysAllowMediaPermission() override = default;
+
+  void HasPermission(Type /*type*/,
+                     PermissionStatusCB permission_status_cb) override {
+    std::move(permission_status_cb).Run(true);
+  }
+  void RequestPermission(Type /*type*/,
+                         PermissionStatusCB permission_status_cb) override {
+    std::move(permission_status_cb).Run(true);
+  }
+  bool IsEncryptedMediaEnabled() override { return true; }
+#if BUILDFLAG(IS_WIN)
+  void IsHardwareSecureDecryptionAllowed(
+      IsHardwareSecureDecryptionAllowedCB cb) override {
+    std::move(cb).Run(true);
+  }
+#endif
+};
+
+media::MediaPermission* GetSoftDisableMediaPermission() {
+  static base::NoDestructor<AlwaysAllowMediaPermission> instance;
+  return instance.get();
+}
 
 bool IsValidPortRange(uint16_t min_port, uint16_t max_port) {
   DCHECK(min_port <= max_port);
@@ -1046,6 +1104,30 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
   // detached, it is impossible for RTCPeerConnectionHandler to outlive the
   // frame. Therefore using a raw pointer of |media_permission| is safe here.
   media::MediaPermission* media_permission = nullptr;
+  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  const WebRtcMode web_rtc_mode =
+      command_line ? GetWebRtcMode(*command_line) : WebRtcMode::kDefault;
+  const bool has_replace_proxy_ip =
+      command_line && command_line->HasSwitch(kWebRtcProxyIpSwitch);
+
+  WebRtcMode effective_mode = web_rtc_mode;
+  if (effective_mode == WebRtcMode::kForwardUdp) {
+    bool is_socks5 = false;
+    if (command_line && command_line->HasSwitch("proxy-server")) {
+      std::string proxy_str = command_line->GetSwitchValueASCII("proxy-server");
+      // Check if proxy starts with socks5://
+      if (proxy_str.length() >= 9 &&
+          std::equal(proxy_str.begin(), proxy_str.begin() + 9, "socks5://",
+                     [](char a, char b) { return tolower(a) == b; })) {
+        is_socks5 = true;
+      }
+    }
+    if (!is_socks5) {
+      LOG(ERROR) << "WebRTC forward_udp requires a socks5:// proxy. Falling back to disabled mode (TCP only).";
+      effective_mode = WebRtcMode::kDisabled;
+    }
+  }
+
   if (!Platform::Current()->ShouldEnforceWebRTCRoutingPreferences()) {
     port_config.enable_multiple_routes = true;
     port_config.enable_nonproxied_udp = true;
@@ -1093,7 +1175,42 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
               << ", max_udp_port: " << max_port
               << ", allow_mdns_obfuscation: " << allow_mdns_obfuscation;
     }
-    if (port_config.enable_multiple_routes) {
+  }
+
+  if (has_replace_proxy_ip) {
+    // Explicitly guarantee UDP is enabled for the 'replace' tier,
+    // overriding any Chromium native proxy-safety policies.
+    port_config.enable_nonproxied_udp = true;
+  } else if (effective_mode == WebRtcMode::kDisabled) {
+    // kDisabled: "Soft Disable" - Mimic AdsPower's behavior.
+    //
+    // Goal: generate "xxx.local typ host" mDNS candidates (avoids Negative
+    // Fingerprint = empty SDP) while NEVER leaking public IP (no srflx).
+    //
+    // Why enable_nonproxied_udp = true (not false):
+    //   port_allocator.cc maps enable_nonproxied_udp=false to:
+    //     PORTALLOCATOR_DISABLE_UDP | PORTALLOCATOR_DISABLE_STUN | ...
+    //   DISABLE_UDP kills local socket creation -> no mDNS host candidates.
+    //   We NEED local UDP binding to generate mDNS entries.
+    //
+    // We block only STUN/Relay AFTER allocator creation via set_flags().
+    port_config.enable_multiple_routes = true;
+    port_config.enable_nonproxied_udp = true;  // keep local UDP alive for mDNS
+    VLOG(3) << "WebRTC mode=disabled -> Soft Disable (mDNS only, STUN blocked by flags)";
+  }
+  // kForwardUdp: WebRTC keeps its normal UDP allocator unchanged.
+  // The actual UDP tunneling through SOCKS5 is done transparently by
+  // Socks5UdpTunnel in the network service layer (services/network/p2p/).
+
+
+  // Choose media_permission for network enumeration:
+  // - Soft Disable (kDisabled): use GetSoftDisableMediaPermission() singleton
+  //   to keep FilteringNetworkManager in ENUMERATION_BLOCKED → mDNS active.
+  // - Normal modes: use the real platform MediaPermission (mic/camera check).
+  if (port_config.enable_multiple_routes) {
+    if (effective_mode == WebRtcMode::kDisabled) {
+      media_permission = GetSoftDisableMediaPermission();
+    } else if (web_frame) {
       media_permission =
           blink::Platform::Current()->GetWebRTCMediaPermission(web_frame);
     }
@@ -1113,6 +1230,19 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
       std::make_unique<LocalNetworkAccessPermissionFactory>(this));
   if (IsValidPortRange(min_port, max_port))
     port_allocator->SetPortRange(min_port, max_port);
+
+  // Soft Disable: UDP binding is allowed (for mDNS), but STUN and Relay are
+  // disabled so libwebrtc never sends packets to STUN servers (which would
+  // expose the public IP). This is done AFTER allocator construction because
+  // port_config has no granular STUN-only control.
+  if (effective_mode == WebRtcMode::kDisabled && !has_replace_proxy_ip) {
+    uint32_t flags = port_allocator->flags();
+    flags |= webrtc::PORTALLOCATOR_DISABLE_STUN;
+    flags |= webrtc::PORTALLOCATOR_DISABLE_RELAY;
+    flags |= webrtc::PORTALLOCATOR_DISABLE_UDP_RELAY;
+    port_allocator->set_flags(flags);
+    VLOG(3) << "WebRTC Soft Disable: STUN+Relay flags set, UDP preserved for mDNS.";
+  }
 
   return port_allocator;
 }

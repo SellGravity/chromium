@@ -21,6 +21,7 @@
 #include "net/base/port_util.h"
 #include "net/log/net_log_source.h"
 #include "services/network/p2p/socket_throttler.h"
+#include "services/network/p2p/socks5_udp_tunnel.h"
 #include "services/network/public/cpp/p2p_socket_type.h"
 #include "services/network/public/mojom/p2p.mojom.h"
 #include "services/network/throttling/throttling_controller.h"
@@ -193,7 +194,8 @@ P2PSocketUdp::P2PSocketUdp(
     const net::NetworkTrafficAnnotationTag& traffic_annotation,
     net::NetLog* net_log,
     const DatagramServerSocketFactory& socket_factory,
-    std::optional<base::UnguessableToken> devtools_token)
+    std::optional<base::UnguessableToken> devtools_token,
+    bool is_socks5_tunnel)
     : P2PSocket(Delegate, std::move(client), std::move(socket), P2PSocket::UDP),
       set_tos_backoff_(&kSetTosBackoffPolicy),
       throttler_(throttler),
@@ -205,7 +207,8 @@ P2PSocketUdp::P2PSocketUdp(
           devtools_token)),
       socket_factory_(socket_factory),
       interceptor_(ThrottlingController::GetP2PInterceptor(
-          net_log_with_source_.source().id)) {
+          net_log_with_source_.source().id)),
+      is_socks5_tunnel_(is_socks5_tunnel) {
   if (interceptor_) {
     interceptor_->RegisterSocket(this);
   }
@@ -246,6 +249,19 @@ void P2PSocketUdp::Init(
 
   socket_ = socket_factory_.Run(net_log());
 
+  // If the socket is a Socks5UdpTunnel, Listen() returns ERR_IO_PENDING while
+  // the SOCKS5 UDP ASSOCIATE handshake is in progress. We register a callback
+  // and defer SocketCreated / DoRead until the handshake completes.
+  if (is_socks5_tunnel_) {
+    auto* tunnel = static_cast<Socks5UdpTunnel*>(socket_.get());
+    tunnel->SetListenDoneCallback(
+        base::BindOnce(&P2PSocketUdp::OnListenDone, base::Unretained(this),
+                       remote_address));
+    // Kick off async handshake; result is always ERR_IO_PENDING here.
+    std::ignore = socket_->Listen(local_address);
+    return;  // Deferred — OnListenDone() will continue.
+  }
+
   int result = -1;
   if (min_port == 0) {
     result = socket_->Listen(local_address);
@@ -271,6 +287,20 @@ void P2PSocketUdp::Init(
     return;
   }
 
+  FinishInit(remote_address);
+}
+
+void P2PSocketUdp::OnListenDone(const P2PHostAndIPEndPoint& remote_address,
+                                 int result) {
+  if (result != net::OK) {
+    LOG(ERROR) << "Socks5UdpTunnel handshake failed: " << result;
+    OnError();
+    return;
+  }
+  FinishInit(remote_address);
+}
+
+void P2PSocketUdp::FinishInit(const P2PHostAndIPEndPoint& remote_address) {
   // Setting recv socket buffer size.
   if (socket_->SetReceiveBufferSize(kUdpRecvSocketBufferSize) != net::OK) {
     LOG(WARNING) << "Failed to set socket receive buffer size to "
@@ -284,7 +314,7 @@ void P2PSocketUdp::Init(
   }
 
   net::IPEndPoint address;
-  result = socket_->GetLocalAddress(&address);
+  int result = socket_->GetLocalAddress(&address);
   if (result < 0) {
     LOG(ERROR) << "P2PSocketUdp::Init(): unable to get local address: "
                << result;

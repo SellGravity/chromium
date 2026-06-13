@@ -23,6 +23,7 @@
 #include "base/synchronization/waitable_event.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_command_line.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/values.h"
 #include "build/build_config.h"
@@ -988,6 +989,54 @@ TEST_F(RTCPeerConnectionHandlerTest, OnIceCandidate) {
   EXPECT_EQ("sdpMid", mock_client_->candidate_mid());
   EXPECT_EQ(1, mock_client_->candidate_mlineindex());
   EXPECT_EQ(kDummySdp, mock_client_->candidate_sdp());
+}
+
+TEST_F(RTCPeerConnectionHandlerTest, OnIceCandidateWithWebRtcProxyIp) {
+  base::test::ScopedCommandLine scoped_command_line;
+  scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
+      "webrtc-proxy-ip", "http://216.9.225.157:3128");
+
+  testing::InSequence sequence;
+  EXPECT_CALL(*mock_tracker_.Get(),
+              TrackAddIceCandidate(pc_handler_.get(), _,
+                                   PeerConnectionTracker::kSourceLocal, true));
+  EXPECT_CALL(*mock_client_.Get(), DidGenerateICECandidate(_));
+
+  std::unique_ptr<webrtc::IceCandidate> native_candidate(
+      mock_dependency_factory_->CreateIceCandidate("sdpMid", 1, kDummySdp));
+  pc_handler_->observer()->OnIceCandidate(native_candidate.get());
+  RunMessageLoopsUntilIdle();
+
+  EXPECT_THAT(mock_client_->candidate_sdp(),
+              testing::HasSubstr("216.9.225.157"));
+  EXPECT_THAT(mock_client_->candidate_sdp(), testing::HasSubstr("typ srflx"));
+  EXPECT_THAT(mock_client_->candidate_sdp(), testing::HasSubstr("raddr"));
+  EXPECT_THAT(mock_client_->candidate_sdp(), testing::HasSubstr("rport 0"));
+}
+
+TEST_F(RTCPeerConnectionHandlerTest, OnIceCandidateWithForwardUdpProxyServer) {
+  base::test::ScopedCommandLine scoped_command_line;
+  scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
+      "webrtc-mode", "forward_udp");
+  scoped_command_line.GetProcessCommandLine()->AppendSwitchASCII(
+      "proxy-server", "http://216.9.225.157:3128");
+
+  testing::InSequence sequence;
+  EXPECT_CALL(*mock_tracker_.Get(),
+              TrackAddIceCandidate(pc_handler_.get(), _,
+                                   PeerConnectionTracker::kSourceLocal, true));
+  EXPECT_CALL(*mock_client_.Get(), DidGenerateICECandidate(_));
+
+  std::unique_ptr<webrtc::IceCandidate> native_candidate(
+      mock_dependency_factory_->CreateIceCandidate("sdpMid", 1, kDummySdp));
+  pc_handler_->observer()->OnIceCandidate(native_candidate.get());
+  RunMessageLoopsUntilIdle();
+
+  EXPECT_THAT(mock_client_->candidate_sdp(),
+              testing::HasSubstr("216.9.225.157"));
+  EXPECT_THAT(mock_client_->candidate_sdp(), testing::HasSubstr("typ srflx"));
+  EXPECT_THAT(mock_client_->candidate_sdp(), testing::HasSubstr("raddr"));
+  EXPECT_THAT(mock_client_->candidate_sdp(), testing::HasSubstr("rport 0"));
 }
 
 TEST_F(RTCPeerConnectionHandlerTest, OnRenegotiationNeeded) {

@@ -29,10 +29,14 @@
 #include "net/url_request/url_request_context.h"
 #include "net/url_request/url_request_context_getter.h"
 #include "services/network/p2p/socket.h"
+#include "services/network/p2p/socket_udp.h"
+#include "services/network/p2p/socks5_udp_tunnel.h"
 #include "services/network/proxy_resolving_client_socket_factory.h"
 #include "services/network/public/cpp/p2p_param_traits.h"
 #include "third_party/webrtc/media/base/rtp_utils.h"
 #include "third_party/webrtc/media/base/turn_utils.h"
+#include "base/command_line.h"
+#include "net/base/host_port_pair.h"
 
 namespace network {
 
@@ -43,6 +47,46 @@ namespace {
 const uint8_t kPublicIPv4Host[] = {8, 8, 8, 8};
 const uint8_t kPublicIPv6Host[] = {
     0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88};
+
+// Parse "socks5://host:port" or "host:port" from --proxy-server flag.
+// Returns false if the proxy is not SOCKS5 or the flag is absent.
+bool GetSocks5ProxyEndpoint(net::IPEndPoint* endpoint_out) {
+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+  if (!cmd || !cmd->HasSwitch("proxy-server"))
+    return false;
+
+  std::string proxy_str = cmd->GetSwitchValueASCII("proxy-server");
+  // Accept "socks5://host:port" or raw "host:port"
+  constexpr std::string_view kSocks5Prefix = "socks5://";
+  if (proxy_str.rfind("socks5://", 0) != 0 &&
+      proxy_str.rfind("socks4", 0) == 0) {
+    // Not SOCKS5.
+    return false;
+  }
+  if (proxy_str.rfind(kSocks5Prefix, 0) == 0) {
+    proxy_str = proxy_str.substr(kSocks5Prefix.size());
+  }
+  net::HostPortPair hpp = net::HostPortPair::FromString(proxy_str);
+  if (hpp.IsEmpty()) return false;
+
+  // Resolve hostname to IPAddress synchronously via simple numeric parse.
+  // For non-numeric hostnames the caller must provide an IP string directly.
+  net::IPAddress addr;
+  if (!addr.AssignFromIPLiteral(hpp.host())) {
+    VLOG(1) << "Socks5UdpTunnel: --proxy-server host is not a numeric IP. "
+               "forward_udp requires an IP address, not a hostname.";
+    return false;
+  }
+  *endpoint_out = net::IPEndPoint(addr, hpp.port());
+  return true;
+}
+
+// Returns true if --webrtc-mode=forward_udp is active.
+bool IsForwardUdpMode() {
+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+  if (!cmd || !cmd->HasSwitch("webrtc-mode")) return false;
+  return cmd->GetSwitchValueASCII("webrtc-mode") == "forward_udp";
+}
 const int kPublicPort = 53;  // DNS port.
 
 // Experimentation shows that creating too many sockets creates odd problems
@@ -419,6 +463,46 @@ void P2PSocketManager::CreateSocket(
     LOG(ERROR) << "Too many sockets created";
     return;
   }
+
+  // ── Socks5UdpTunnel injection for --webrtc-mode=forward_udp ──────────────
+  // When forward_udp is active and the socket being created is a UDP P2P
+  // socket, replace the default UDPServerSocket factory with Socks5UdpTunnel.
+  // This is transparent to P2PSocketUdp: it calls the same Listen/SendTo/
+  // RecvFrom interface, but packets are tunneled through SOCKS5 UDP ASSOCIATE.
+  if (type == P2P_SOCKET_UDP && IsForwardUdpMode()) {
+    net::IPEndPoint proxy_endpoint;
+    if (GetSocks5ProxyEndpoint(&proxy_endpoint)) {
+      net::NetLog* net_log = url_request_context_->net_log();
+      // Build the factory: each call creates a new Socks5UdpTunnel bound to
+      // the same proxy endpoint. The tunnel's async handshake is driven by
+      // P2PSocketUdp::Init() calling Listen(), which returns ERR_IO_PENDING
+      // and later fires the listen_done_callback.
+      P2PSocketUdp::DatagramServerSocketFactory socks5_factory =
+          base::BindRepeating(
+              [](net::IPEndPoint proxy_ep,
+                 net::NetLog* log) -> std::unique_ptr<net::DatagramServerSocket> {
+                return std::make_unique<Socks5UdpTunnel>(proxy_ep, log);
+              },
+              proxy_endpoint);
+
+
+      auto socket = std::make_unique<P2PSocketUdp>(
+          this, std::move(client), std::move(receiver), &throttler_,
+          net::NetworkTrafficAnnotationTag(traffic_annotation), net_log,
+          socks5_factory, devtools_token, /*is_socks5_tunnel=*/true);
+
+      P2PSocket* socket_ptr = socket.get();
+      sockets_[socket_ptr] = std::move(socket);
+      socket_ptr->Init(local_address, port_range.min_port, port_range.max_port,
+                       remote_address, network_anonymization_key_);
+      return;
+    } else {
+      LOG(WARNING) << "forward_udp: --proxy-server is not a valid SOCKS5 IP "
+                      "address. Falling back to direct UDP (no tunnel).";
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   std::unique_ptr<P2PSocket> socket = P2PSocket::Create(
       this, std::move(client), std::move(receiver), type,
       net::NetworkTrafficAnnotationTag(traffic_annotation),

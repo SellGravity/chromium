@@ -6,6 +6,7 @@
 
 #include <string.h>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <regex>
@@ -139,6 +140,23 @@ static std::string NormalizeProxyIp(const std::string& proxy_ip_raw) {
   return pure_ip;
 }
 
+static std::string GetWebRtcSdpProxyIp(
+    const base::CommandLine* command_line) {
+  if (!command_line) {
+    return {};
+  }
+
+  // Only --webrtc-proxy-ip triggers Blink-layer SDP sanitization (Luong 1).
+  // --webrtc-mode=forward_udp (Luong 2) tunnels UDP at the C++ network layer;
+  // the SDP reflects the tunnel's real exit IP naturally. Never tamper with it
+  // here — double-editing (C++ tunnel + Blink SanitizeSdp) creates corrupt SDP.
+  if (command_line->HasSwitch("webrtc-proxy-ip")) {
+    return command_line->GetSwitchValueASCII("webrtc-proxy-ip");
+  }
+
+  return {};
+}
+
 static String SanitizeSdp(const String& sdp, const std::string& proxy_ip_raw) {
   std::string sdp_str = sdp.Utf8();
   if (proxy_ip_raw.empty()) return sdp;
@@ -245,12 +263,9 @@ RTCSessionDescriptionPlatform* CreateWebKitSessionDescription(
 
   String sdp_str = String::FromUTF8(sdp);
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (command_line && command_line->HasSwitch("webrtc-proxy-ip")) {
-    std::string proxy_ip =
-        command_line->GetSwitchValueASCII("webrtc-proxy-ip");
-    if (!proxy_ip.empty()) {
-      sdp_str = SanitizeSdp(sdp_str, proxy_ip);
-    }
+  std::string proxy_ip = GetWebRtcSdpProxyIp(command_line);
+  if (!proxy_ip.empty()) {
+    sdp_str = SanitizeSdp(sdp_str, proxy_ip);
   }
 
   return CreateWebKitSessionDescription(sdp_str.Utf8(), native_desc->type());
@@ -2184,16 +2199,14 @@ void RTCPeerConnectionHandler::OnIceCandidate(const String& sdp,
   TRACE_EVENT0("webrtc", "RTCPeerConnectionHandler::OnIceCandidateImpl");
 
   // WebRTC "Base on IP Proxy": Replace real IP with proxy IP in ICE candidates.
-  // When --webrtc-proxy-ip=<IP> is set, all real IPv4 addresses in the
-  // candidate SDP are replaced with the proxy IP before exposing to JavaScript.
+  // When --webrtc-proxy-ip=<IP> is set, or when --webrtc-mode=forward_udp with
+  // --proxy-server=<proxy> is set, the candidate SDP is sanitized before
+  // exposing to JavaScript.
   String modified_sdp = sdp;
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (command_line && command_line->HasSwitch("webrtc-proxy-ip")) {
-    std::string proxy_ip =
-        command_line->GetSwitchValueASCII("webrtc-proxy-ip");
-    if (!proxy_ip.empty()) {
-      modified_sdp = SanitizeSdp(sdp, proxy_ip);
-    }
+  std::string proxy_ip = GetWebRtcSdpProxyIp(command_line);
+  if (!proxy_ip.empty()) {
+    modified_sdp = SanitizeSdp(sdp, proxy_ip);
   }
 
   // This line can cause garbage collection.

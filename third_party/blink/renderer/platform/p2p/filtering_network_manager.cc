@@ -115,10 +115,9 @@ webrtc::MdnsResponderInterface* FilteringNetworkManager::GetMdnsResponder()
   if (!network_manager_for_signaling_thread_)
     return nullptr;
 
-  // mDNS responder is set to null if we have the enumeration permission or the
+  // mDNS responder is set to null if the
   // mDNS obfuscation of IPs is disallowed.
-  if (enumeration_permission() == ENUMERATION_ALLOWED ||
-      !allow_mdns_obfuscation_) {
+  if (!allow_mdns_obfuscation_) {
     return nullptr;
   }
 
