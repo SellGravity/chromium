@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/command_line.h"
 #include "base/functional/callback_helpers.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/strings/string_util.h"
@@ -27,6 +28,7 @@
 #include "net/log/net_log_source.h"
 #include "net/log/net_log_source_type.h"
 #include "net/log/net_log_with_source.h"
+#include "url/gurl.h"
 #include "url/scheme_host_port.h"
 
 namespace net {
@@ -453,6 +455,47 @@ bool HttpAuthController::SelectNextAuthIdentityToTry() {
     // TODO(eroman): If the password is blank, should we also try combining
     // with a password from the cache?
     return true;
+  }
+
+  // Try to use proxy credentials from command line flag.
+  if (target_ == HttpAuth::AUTH_PROXY && !embedded_identity_used_) {
+    auto* command_line = base::CommandLine::ForCurrentProcess();
+    if (command_line->HasSwitch("proxy-server")) {
+      std::string proxy_server = command_line->GetSwitchValueASCII("proxy-server");
+      std::string host = auth_scheme_host_port_.host();
+      size_t host_pos = proxy_server.find(host);
+
+      while (host_pos != std::string::npos) {
+        if (host_pos > 0 && proxy_server[host_pos - 1] == '@') {
+          size_t at_pos = host_pos - 1;
+          size_t start_pos = proxy_server.rfind("://", at_pos);
+          if (start_pos != std::string::npos) {
+            start_pos += 3;
+          } else {
+            start_pos = proxy_server.rfind('=', at_pos);
+            if (start_pos != std::string::npos) {
+              start_pos += 1;
+            } else {
+              start_pos = 0;
+            }
+          }
+          std::string dummy_url = "http://" + proxy_server.substr(
+                                                  start_pos, host_pos - start_pos + host.length());
+          GURL proxy_url(dummy_url);
+          if (proxy_url.has_username() && proxy_url.has_password()) {
+            std::u16string username;
+            std::u16string password;
+            GetIdentityFromURL(proxy_url, &username, &password);
+            identity_.source = HttpAuth::IDENT_SRC_EXTERNAL;
+            identity_.invalid = false;
+            identity_.credentials.Set(username, password);
+            embedded_identity_used_ = true;
+            return true;
+          }
+        }
+        host_pos = proxy_server.find(host, host_pos + 1);
+      }
+    }
   }
 
   // Check the auth cache for a realm entry.

@@ -217,8 +217,7 @@ ProxyServer ProxySchemeHostAndPortToProxyServer(
                       url::Component(0, host_and_port.size()),
                       &username_component, &password_component,
                       &hostname_component, &port_component);
-  if (username_component.is_valid() || password_component.is_valid() ||
-      hostname_component.is_empty()) {
+  if (hostname_component.is_empty()) {
     return ProxyServer();
   }
 
