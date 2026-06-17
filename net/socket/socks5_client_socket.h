@@ -82,6 +82,10 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
     STATE_GREET_WRITE_COMPLETE,
     STATE_GREET_READ,
     STATE_GREET_READ_COMPLETE,
+    STATE_AUTH_WRITE,           // RFC 1929 username/password sub-auth write
+    STATE_AUTH_WRITE_COMPLETE,
+    STATE_AUTH_READ,            // RFC 1929 auth reply read
+    STATE_AUTH_READ_COMPLETE,
     STATE_HANDSHAKE_WRITE,
     STATE_HANDSHAKE_WRITE_COMPLETE,
     STATE_HANDSHAKE_READ,
@@ -117,6 +121,14 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
   int DoGreetWrite();
   int DoGreetWriteComplete(int result);
 
+  int DoAuthWrite();
+  int DoAuthWriteComplete(int result);
+  int DoAuthRead();
+  int DoAuthReadComplete(int result);
+
+  // Parses "user:pass" from --proxy-server flag. Returns false if absent.
+  static bool GetProxyCredentials(std::string* user_out, std::string* pass_out);
+
   // Creates a DrainableIOBuffer containing the SOCKS handshake.
   scoped_refptr<DrainableIOBuffer> BuildHandshakeWriteBuffer() const;
 
@@ -146,6 +158,10 @@ class NET_EXPORT_PRIVATE SOCKS5ClientSocket : public StreamSocket {
   const HostPortPair destination_;
 
   NetLogWithSource net_log_;
+
+  // Proxy credentials extracted from --proxy-server (RFC 1929 auth).
+  std::string username_;
+  std::string password_;
 
   // Traffic annotation for socket control.
   NetworkTrafficAnnotationTag traffic_annotation_;

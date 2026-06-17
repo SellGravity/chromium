@@ -9,7 +9,9 @@
 #include <array>
 #include <utility>
 
+#include "base/command_line.h"
 #include "base/compiler_specific.h"
+#include "base/files/file_util.h"
 #include "base/format_macros.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
@@ -224,6 +226,20 @@ int SOCKS5ClientSocket::DoLoop(int last_io_result) {
         net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_GREET_READ,
                                           rv);
         break;
+      case STATE_AUTH_WRITE:
+        DCHECK_EQ(OK, rv);
+        rv = DoAuthWrite();
+        break;
+      case STATE_AUTH_WRITE_COMPLETE:
+        rv = DoAuthWriteComplete(rv);
+        break;
+      case STATE_AUTH_READ:
+        DCHECK_EQ(OK, rv);
+        rv = DoAuthRead();
+        break;
+      case STATE_AUTH_READ_COMPLETE:
+        rv = DoAuthReadComplete(rv);
+        break;
       case STATE_HANDSHAKE_WRITE:
         DCHECK_EQ(OK, rv);
         net_log_.BeginEvent(NetLogEventType::SOCKS5_HANDSHAKE_WRITE);
@@ -251,9 +267,8 @@ int SOCKS5ClientSocket::DoLoop(int last_io_result) {
   return rv;
 }
 
-static constexpr std::array<uint8_t, 3> kSOCKS5GreetWriteData{
-    0x05, 0x01, 0x00};  // no authentication
-
+// Offer both NO_AUTH (0x00) and USERNAME_PASSWORD (0x02) so that proxies
+// requiring RFC 1929 auth can select their preferred method.
 int SOCKS5ClientSocket::DoGreetWrite() {
   // Since we only have 1 byte to send the hostname length in, if the
   // URL has a hostname longer than 255 characters we can't send it.
@@ -263,10 +278,19 @@ int SOCKS5ClientSocket::DoGreetWrite() {
   }
 
   if (!write_buf_) {
-    auto greet_buffer =
-        base::MakeRefCounted<WrappedIOBuffer>(kSOCKS5GreetWriteData);
+    std::string dummy_user, dummy_pass;
+    bool has_creds = GetProxyCredentials(&dummy_user, &dummy_pass);
+    std::vector<uint8_t> greet_data;
+    if (has_creds) {
+      greet_data = {0x05, 0x02, 0x00, 0x02}; // ver=5, nmethods=2, no-auth, user/pass
+    } else {
+      greet_data = {0x05, 0x01, 0x00}; // ver=5, nmethods=1, no-auth
+    }
+    auto copy_buffer = base::MakeRefCounted<IOBufferWithSize>(greet_data.size());
+    std::copy(greet_data.begin(), greet_data.end(), copy_buffer->data());
+
     write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
-        std::move(greet_buffer), greet_buffer->size());
+        std::move(copy_buffer), greet_data.size());
   }
 
   next_state_ = STATE_GREET_WRITE_COMPLETE;
@@ -306,6 +330,7 @@ int SOCKS5ClientSocket::DoGreetReadComplete(int result) {
   if (result == 0) {
     net_log_.AddEvent(
         NetLogEventType::SOCKS_UNEXPECTEDLY_CLOSED_DURING_GREETING);
+    LOG(ERROR) << "SOCKS5: Unexpectedly closed during greeting";
     return ERR_SOCKS_CONNECTION_FAILED;
   }
 
@@ -317,18 +342,147 @@ int SOCKS5ClientSocket::DoGreetReadComplete(int result) {
 
   // Got the greet data.
   base::span<uint8_t> read_data = read_buf_->span_before_offset();
+  LOG(ERROR) << "SOCKS5 Greet Reply: VER=0x" << std::hex << (int)read_data[0] 
+             << " METHOD=0x" << (int)read_data[1] << std::dec;
 
   if (read_data[0] != kSOCKS5Version) {
     net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_VERSION,
                                    "version", read_data[0]);
     return ERR_SOCKS_CONNECTION_FAILED;
   }
+  if (read_data[1] == 0xFF) {
+    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
+                                   "method", read_data[1]);
+    return ERR_SOCKS_CONNECTION_FAILED;
+  }
+
+  {
+    FILE* fp = fopen("C:\\temp\\socks_trace.txt", "a");
+    if (fp) {
+      fprintf(fp, "Greet Reply: %d for host %s\n", (int)read_data[1], destination_.host().c_str());
+      fclose(fp);
+    }
+  }
+
+  if (read_data[1] == 0x02) {
+    // Proxy chose USERNAME_PASSWORD (RFC 1929): load credentials and auth.
+    GetProxyCredentials(&username_, &password_);
+    read_buf_.reset();
+    next_state_ = STATE_AUTH_WRITE;
+    return OK;
+  }
+
   if (read_data[1] != 0x00) {
     net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
                                    "method", read_data[1]);
     return ERR_SOCKS_CONNECTION_FAILED;
   }
 
+  // Method 0x00 (NO AUTH) — proceed directly to CONNECT request.
+  read_buf_.reset();
+  next_state_ = STATE_HANDSHAKE_WRITE;
+  return OK;
+}
+
+// ── RFC 1929 sub-negotiation ──────────────────────────────────────────────────
+
+// static
+bool SOCKS5ClientSocket::GetProxyCredentials(std::string* user_out,
+                                             std::string* pass_out) {
+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+  if (!cmd)
+    return false;
+
+  // Check if credentials were automatically extracted by chrome_main_delegate.cc
+  if (cmd->HasSwitch("proxy-auth-user") && cmd->HasSwitch("proxy-auth-pass")) {
+    *user_out = cmd->GetSwitchValueASCII("proxy-auth-user");
+    *pass_out = cmd->GetSwitchValueASCII("proxy-auth-pass");
+    return !user_out->empty();
+  }
+
+  // Fallback to parsing --proxy-server directly (e.g. if we are in a process where
+  // chrome_main_delegate did not strip them, or if testing)
+  if (!cmd->HasSwitch("proxy-server"))
+    return false;
+  std::string s = cmd->GetSwitchValueASCII("proxy-server");
+  // Strip scheme prefix
+  for (const char* pfx : {"socks5://", "socks4://", "http://", "https://"}) {
+    if (s.rfind(pfx, 0) == 0) { s = s.substr(strlen(pfx)); break; }
+  }
+  // Look for user:pass@host:port
+  auto at = s.rfind('@');
+  if (at == std::string::npos) return false;
+  std::string creds = s.substr(0, at);
+  auto colon = creds.find(':');
+  if (colon == std::string::npos) return false;
+  *user_out = creds.substr(0, colon);
+  *pass_out = creds.substr(colon + 1);
+  return !user_out->empty();
+}
+
+int SOCKS5ClientSocket::DoAuthWrite() {
+  if (!write_buf_) {
+    // RFC 1929: VER=0x01, ULEN, UNAME, PLEN, PASSWD
+    const uint8_t ulen = static_cast<uint8_t>(username_.size());
+    const uint8_t plen = static_cast<uint8_t>(password_.size());
+    std::vector<uint8_t> auth_buf;
+    auth_buf.reserve(3 + ulen + plen);
+    auth_buf.push_back(0x01);  // sub-negotiation version
+    auth_buf.push_back(ulen);
+    for (char c : username_) auth_buf.push_back(static_cast<uint8_t>(c));
+    auth_buf.push_back(plen);
+    for (char c : password_) auth_buf.push_back(static_cast<uint8_t>(c));
+
+    auto raw = base::MakeRefCounted<IOBufferWithSize>(auth_buf.size());
+    std::copy(auth_buf.begin(), auth_buf.end(),
+              reinterpret_cast<uint8_t*>(raw->data()));
+    write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
+        std::move(raw), auth_buf.size());
+  }
+  next_state_ = STATE_AUTH_WRITE_COMPLETE;
+  return transport_socket_->Write(write_buf_.get(),
+                                  write_buf_->BytesRemaining(), io_callback_,
+                                  traffic_annotation_);
+}
+
+int SOCKS5ClientSocket::DoAuthWriteComplete(int result) {
+  if (result < 0) return result;
+  write_buf_->DidConsume(result);
+  if (write_buf_->BytesRemaining() == 0) {
+    write_buf_.reset();
+    next_state_ = STATE_AUTH_READ;
+  } else {
+    next_state_ = STATE_AUTH_WRITE;
+  }
+  return OK;
+}
+
+int SOCKS5ClientSocket::DoAuthRead() {
+  next_state_ = STATE_AUTH_READ_COMPLETE;
+  if (!read_buf_) {
+    read_buf_ = base::MakeRefCounted<GrowableIOBuffer>();
+    read_buf_->SetCapacity(2);  // RFC 1929 reply: VER(1) STATUS(1)
+  }
+  return transport_socket_->Read(read_buf_.get(),
+                                 read_buf_->RemainingCapacity(), io_callback_);
+}
+
+int SOCKS5ClientSocket::DoAuthReadComplete(int result) {
+  if (result <= 0)
+    return result == 0 ? ERR_CONNECTION_CLOSED : result;
+  read_buf_->set_offset(read_buf_->offset() + result);
+  if (read_buf_->RemainingCapacity() > 0) {
+    next_state_ = STATE_AUTH_READ;
+    return OK;
+  }
+  base::span<uint8_t> data = read_buf_->span_before_offset();
+  LOG(ERROR) << "SOCKS5 Auth Reply: STATUS=0x" << std::hex << (int)data[1] << std::dec;
+  if (data[1] != 0x00) {
+    // Non-zero STATUS means credentials rejected.
+    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
+                                   "auth_status", data[1]);
+    return ERR_SOCKS_CONNECTION_FAILED;
+  }
   read_buf_.reset();
   next_state_ = STATE_HANDSHAKE_WRITE;
   return OK;
@@ -410,6 +564,7 @@ int SOCKS5ClientSocket::DoHandshakeReadComplete(int result) {
   if (result == 0) {
     net_log_.AddEvent(
         NetLogEventType::SOCKS_UNEXPECTEDLY_CLOSED_DURING_HANDSHAKE);
+    LOG(ERROR) << "SOCKS5: Unexpectedly closed during handshake";
     return ERR_SOCKS_CONNECTION_FAILED;
   }
 
@@ -419,6 +574,7 @@ int SOCKS5ClientSocket::DoHandshakeReadComplete(int result) {
   // and accordingly increase them
   if (read_buf_->offset() == kReadHeaderSize) {
     base::span<uint8_t> read_data = read_buf_->span_before_offset();
+    LOG(ERROR) << "SOCKS5 Handshake Reply: REP=0x" << std::hex << (int)read_data[1] << std::dec;
 
     if (read_data[0] != kSOCKS5Version || read_data[2] != kNullByte) {
       net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_VERSION,

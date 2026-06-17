@@ -366,6 +366,15 @@ int ProxyResolvingClientSocket::ReconsiderProxyAfterError(int error) {
   if (!proxy_info_.Fallback(error, net_log_))
     return error;
 
+  // KILL-SWITCH for WebRTC and any proxy-tunneling traffic:
+  // If the proxy fallback mechanism degraded us to DIRECT (no proxy),
+  // but the user explicitly configured a proxy, we must ABORT.
+  // Connecting DIRECTLY defeats the purpose of the proxy!
+  if (proxy_info_.is_direct()) {
+    LOG(ERROR) << "ProxyResolvingClientSocket KILL-SWITCH: Proxy failed, and Chrome attempted to fallback to DIRECT. Blocking this to prevent IP leaks!";
+    return net::ERR_PROXY_CONNECTION_FAILED; // Force failure!
+  }
+
   next_state_ = STATE_INIT_CONNECTION;
   return net::OK;
 }
