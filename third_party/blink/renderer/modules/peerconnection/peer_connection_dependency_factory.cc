@@ -1177,7 +1177,13 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
     }
   }
 
-  if (has_replace_proxy_ip) {
+  if (effective_mode == WebRtcMode::kForwardUdp) {
+    // When using forward_udp (proxy mode), we DO NOT change enable_multiple_routes.
+    // We let WebRTC gather real local interfaces to generate organic .local mDNS candidates.
+    // We use the native allow_mdns_obfuscation value to mimic Chrome perfectly.
+    port_config.enable_nonproxied_udp = true;
+    VLOG(3) << "WebRTC mode=forward_udp -> Organic mDNS hiding + Proxied STUN";
+  } else if (has_replace_proxy_ip) {
     // Explicitly guarantee UDP is enabled for the 'replace' tier,
     // overriding any Chromium native proxy-safety policies.
     port_config.enable_nonproxied_udp = true;
@@ -1218,8 +1224,19 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
 
   std::unique_ptr<webrtc::NetworkManager> network_manager;
   if (port_config.enable_multiple_routes) {
-    network_manager = std::make_unique<FilteringNetworkManager>(
-        network_manager_.get(), media_permission, allow_mdns_obfuscation);
+    // Soft Disable: pass force_mdns_obfuscation=true so local IPs are ALWAYS
+    // hashed to xxx.local regardless of ENUMERATION_ALLOWED state. Other modes
+    // use the 3-arg constructor (force_mdns=false, standard behavior).
+    const bool force_mdns = (effective_mode == WebRtcMode::kDisabled &&
+                             !has_replace_proxy_ip);
+    if (force_mdns) {
+      network_manager = std::make_unique<FilteringNetworkManager>(
+          network_manager_.get(), media_permission, allow_mdns_obfuscation,
+          /*force_mdns_obfuscation=*/true);
+    } else {
+      network_manager = std::make_unique<FilteringNetworkManager>(
+          network_manager_.get(), media_permission, allow_mdns_obfuscation);
+    }
   } else {
     network_manager =
         std::make_unique<blink::EmptyNetworkManager>(network_manager_.get());
@@ -1231,12 +1248,20 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
   if (IsValidPortRange(min_port, max_port))
     port_allocator->SetPortRange(min_port, max_port);
 
+  // Disable IPv6 globally for WebRTC in Anti-Detect browser.
+  // This prevents Public IPv6 addresses (bound to physical adapters) 
+  // from leaking as 'host' candidates into the SDP.
+  uint32_t flags = port_allocator->flags();
+  flags &= ~webrtc::PORTALLOCATOR_ENABLE_IPV6;
+  flags &= ~webrtc::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
+  port_allocator->set_flags(flags);
+
   // Soft Disable: UDP binding is allowed (for mDNS), but STUN and Relay are
   // disabled so libwebrtc never sends packets to STUN servers (which would
   // expose the public IP). This is done AFTER allocator construction because
   // port_config has no granular STUN-only control.
   if (effective_mode == WebRtcMode::kDisabled && !has_replace_proxy_ip) {
-    uint32_t flags = port_allocator->flags();
+    flags = port_allocator->flags();
     flags |= webrtc::PORTALLOCATOR_DISABLE_STUN;
     flags |= webrtc::PORTALLOCATOR_DISABLE_RELAY;
     flags |= webrtc::PORTALLOCATOR_DISABLE_UDP_RELAY;

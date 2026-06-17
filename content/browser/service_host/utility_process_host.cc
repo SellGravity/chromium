@@ -415,6 +415,8 @@ bool UtilityProcessHost::StartProcess() {
       switches::kUseMockCertVerifierForTesting,
       "media-device-count",
       "proxy-server",
+      "proxy-auth-user",
+      "proxy-auth-pass",
       "webrtc-proxy-ip",
       "webrtc-mode",
       switches::kMockCertVerifierDefaultResultForTesting,

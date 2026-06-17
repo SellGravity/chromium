@@ -45,6 +45,13 @@ class FilteringNetworkManager : public webrtc::NetworkManagerBase,
       IpcNetworkManager* network_manager,
       media::MediaPermission* media_permission,
       bool allow_mdns_obfuscation);
+  // Used by Soft Disable mode: force_mdns_obfuscation=true ensures local IPs
+  // are always hashed to xxx.local even when ENUMERATION_ALLOWED.
+  PLATFORM_EXPORT FilteringNetworkManager(
+      IpcNetworkManager* network_manager,
+      media::MediaPermission* media_permission,
+      bool allow_mdns_obfuscation,
+      bool force_mdns_obfuscation);
   FilteringNetworkManager(const FilteringNetworkManager&) = delete;
   FilteringNetworkManager& operator=(const FilteringNetworkManager&) = delete;
 
@@ -119,6 +126,10 @@ class FilteringNetworkManager : public webrtc::NetworkManagerBase,
 
   // Track whether StartUpdating has been called.
   bool start_updating_called_ = false;
+
+  // When true, force mDNS obfuscation regardless of ENUMERATION_ALLOWED.
+  // Used only by Soft Disable mode.
+  bool force_mdns_obfuscation_ = false;
 
   // When the mDNS obfuscation is allowed, access to the mDNS responder provided
   // by the base network manager is provided to conceal IPs with mDNS hostnames.

@@ -17,6 +17,7 @@
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/numerics/byte_conversions.h"
+#include "base/task/single_thread_task_runner.h"
 #include "net/base/io_buffer.h"
 #include "net/base/ip_address.h"
 #include "net/base/net_errors.h"
@@ -34,13 +35,16 @@ constexpr int kUdpRelayReadBufferSize = 65536;
 // SOCKS5 constants (RFC 1928)
 constexpr uint8_t kSocks5Version        = 0x05;
 constexpr uint8_t kSocks5MethodNoAuth   = 0x00;
+constexpr uint8_t kSocks5MethodUserPass = 0x02;  // RFC 1929
 constexpr uint8_t kSocks5MethodNoAccept = 0xFF;
 constexpr uint8_t kSocks5CmdUdpAssoc    = 0x03;
 constexpr uint8_t kSocks5AtypIpv4       = 0x01;
 constexpr uint8_t kSocks5AtypIpv6       = 0x04;
 constexpr uint8_t kSocks5RepSuccess     = 0x00;
+constexpr uint8_t kSocks5AuthVersion    = 0x01;  // RFC 1929 sub-negotiation ver
 
-constexpr int kGreetingLen      = 3;
+// kGreetingLen is intentionally omitted: SendGreeting() computes the length
+// dynamically (3 bytes for no-auth-only, 4 bytes when offering USER_PASS too).
 constexpr int kServerChoiceLen  = 2;
 constexpr int kAssocRequestLen  = 10;
 constexpr int kMaxAssocReplyLen = 22;
@@ -91,8 +95,12 @@ base::SpanReader<const uint8_t> MakeReader(net::IOBufferWithSize* buf,
 // ─────────────────────────────────────────────────────────────────────────────
 
 Socks5UdpTunnel::Socks5UdpTunnel(const net::IPEndPoint& proxy_endpoint,
-                                   net::NetLog* net_log)
+                                   net::NetLog* net_log,
+                                   std::string username,
+                                   std::string password)
     : proxy_endpoint_(proxy_endpoint),
+      username_(std::move(username)),
+      password_(std::move(password)),
       net_log_(net::NetLogWithSource::Make(net_log,
                                            net::NetLogSourceType::SOCKET)) {}
 
@@ -107,6 +115,7 @@ Socks5UdpTunnel::~Socks5UdpTunnel() {
 int Socks5UdpTunnel::Listen(const net::IPEndPoint& address) {
   DCHECK_EQ(state_, State::kInit);
   local_udp_address_ = address;
+  LOG(INFO) << "Socks5UdpTunnel: Listen called with address=" << address.ToString();
   state_ = State::kConnecting;
   DoConnect();
   return net::ERR_IO_PENDING;
@@ -148,15 +157,23 @@ void Socks5UdpTunnel::OnConnectDone(int result) {
 
 void Socks5UdpTunnel::SendGreeting() {
   state_ = State::kSendingGreeting;
+  // Offer 2 methods: NO_AUTH (0x00) and USERNAME_PASSWORD (0x02).
+  // If the proxy only needs NO_AUTH it will choose 0x00; if it requires
+  // credentials it will choose 0x02 and we run RFC 1929 sub-negotiation.
+  const bool has_creds = !username_.empty();
+  const int num_methods = has_creds ? 2 : 1;
+  const int greeting_len = 2 + num_methods;
   handshake_write_buf_ =
-      base::MakeRefCounted<net::IOBufferWithSize>(kGreetingLen);
+      base::MakeRefCounted<net::IOBufferWithSize>(greeting_len);
   auto writer = base::SpanWriter(handshake_write_buf_->span());
   writer.WriteU8BigEndian(kSocks5Version);
-  writer.WriteU8BigEndian(uint8_t{0x01});
+  writer.WriteU8BigEndian(static_cast<uint8_t>(num_methods));
   writer.WriteU8BigEndian(kSocks5MethodNoAuth);
+  if (has_creds)
+    writer.WriteU8BigEndian(kSocks5MethodUserPass);
 
   int rv = control_socket_->Write(
-      handshake_write_buf_.get(), kGreetingLen,
+      handshake_write_buf_.get(), greeting_len,
       base::BindOnce(&Socks5UdpTunnel::OnGreetingSent,
                      weak_factory_.GetWeakPtr()),
       GetTrafficAnnotation());
@@ -219,6 +236,85 @@ void Socks5UdpTunnel::OnServerChoiceRead(int result) {
     OnSetupComplete(net::ERR_FAILED);
     return;
   }
+  if (method == kSocks5MethodUserPass) {
+    // Proxy wants RFC 1929 username/password sub-negotiation.
+    SendAuth();
+    return;
+  }
+  // method == kSocks5MethodNoAuth (0x00)
+  SendAssociateRequest();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 3b — RFC 1929 username/password sub-negotiation
+//   VER(1=0x01) ULEN(1) UNAME(ULEN) PLEN(1) PASSWD(PLEN)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Socks5UdpTunnel::SendAuth() {
+  state_ = State::kSendingAuth;
+  // RFC 1929: VER=0x01, ULEN, UNAME, PLEN, PASSWD
+  const size_t ulen = username_.size();
+  const size_t plen = password_.size();
+  const int auth_len = 1 + 1 + static_cast<int>(ulen) +
+                        1 + static_cast<int>(plen);
+  handshake_write_buf_ =
+      base::MakeRefCounted<net::IOBufferWithSize>(auth_len);
+  auto writer = base::SpanWriter(handshake_write_buf_->span());
+  writer.WriteU8BigEndian(kSocks5AuthVersion);
+  writer.WriteU8BigEndian(static_cast<uint8_t>(ulen));
+  for (char c : username_) writer.WriteU8BigEndian(static_cast<uint8_t>(c));
+  writer.WriteU8BigEndian(static_cast<uint8_t>(plen));
+  for (char c : password_) writer.WriteU8BigEndian(static_cast<uint8_t>(c));
+
+  int rv = control_socket_->Write(
+      handshake_write_buf_.get(), auth_len,
+      base::BindOnce(&Socks5UdpTunnel::OnAuthSent,
+                     weak_factory_.GetWeakPtr()),
+      GetTrafficAnnotation());
+  if (rv != net::ERR_IO_PENDING)
+    OnAuthSent(rv);
+}
+
+void Socks5UdpTunnel::OnAuthSent(int result) {
+  if (result < 0) {
+    LOG(ERROR) << "Socks5UdpTunnel: auth write failed: " << result;
+    OnSetupComplete(result);
+    return;
+  }
+  ReadAuthReply();
+}
+
+void Socks5UdpTunnel::ReadAuthReply() {
+  state_ = State::kReadingAuthReply;
+  // RFC 1929 reply is 2 bytes: VER(1) STATUS(1). STATUS=0 means success.
+  handshake_read_buf_ =
+      base::MakeRefCounted<net::IOBufferWithSize>(2);
+  handshake_read_offset_ = 0;
+  int rv = control_socket_->Read(
+      handshake_read_buf_.get(), 2,
+      base::BindOnce(&Socks5UdpTunnel::OnAuthReplyRead,
+                     weak_factory_.GetWeakPtr()));
+  if (rv != net::ERR_IO_PENDING)
+    OnAuthReplyRead(rv);
+}
+
+void Socks5UdpTunnel::OnAuthReplyRead(int result) {
+  if (result <= 0) {
+    LOG(ERROR) << "Socks5UdpTunnel: auth reply read failed: " << result;
+    OnSetupComplete(result == 0 ? net::ERR_CONNECTION_CLOSED : result);
+    return;
+  }
+  auto reader = MakeReader(handshake_read_buf_.get(), 2);
+  uint8_t ver = 0, status = 0;
+  reader.ReadU8BigEndian(ver);
+  reader.ReadU8BigEndian(status);
+  if (status != 0x00) {
+    LOG(ERROR) << "Socks5UdpTunnel: proxy rejected credentials (status="
+               << static_cast<int>(status) << "). Check username/password.";
+    OnSetupComplete(net::ERR_PROXY_AUTH_UNSUPPORTED);
+    return;
+  }
+  VLOG(3) << "Socks5UdpTunnel: RFC 1929 auth succeeded.";
   SendAssociateRequest();
 }
 
@@ -325,8 +421,15 @@ void Socks5UdpTunnel::ProcessAssociateReply() {
 
   if (ver != kSocks5Version || rep != kSocks5RepSuccess) {
     LOG(ERROR) << "Socks5UdpTunnel: ASSOCIATE failed, REP=0x"
-               << std::hex << static_cast<int>(rep);
-    OnSetupComplete(net::ERR_FAILED);
+               << std::hex << static_cast<int>(rep)
+               << ". FAKING SUCCESS to preserve 'host' candidate!";
+    // If the proxy doesn't support UDP, we STILL need to pretend it succeeded,
+    // otherwise the UDP port fails instantly, and WebRTC generates an empty SDP!
+    // A browser with NO host candidates is highly suspicious.
+    // By faking success, the UDP socket stays alive, drops outgoing packets silently,
+    // and WebRTC naturally times out STUN. But the 'host' candidate is preserved!
+    fake_success_ = true;
+    BindLocalUdp(local_udp_address_);
     return;
   }
 
@@ -335,8 +438,13 @@ void Socks5UdpTunnel::ProcessAssociateReply() {
     OnSetupComplete(net::ERR_FAILED);
     return;
   }
-  relay_endpoint_ = relay;
-  VLOG(1) << "Socks5UdpTunnel: relay=" << relay_endpoint_.ToString();
+  // Proxies behind NAT or Docker (like Gost) often return their internal IP 
+  // (e.g. 172.24.0.2) in the ASSOCIATE reply. The client cannot route to this IP.
+  // We MUST always use the original proxy IP we connected to.
+  relay_endpoint_ = net::IPEndPoint(proxy_endpoint_.address(), relay.port());
+  
+  LOG(INFO) << "Socks5UdpTunnel: relay=" << relay_endpoint_.ToString() 
+            << " (original proxy IP forced)";
   BindLocalUdp(local_udp_address_);
 }
 
@@ -387,8 +495,9 @@ void Socks5UdpTunnel::BindLocalUdp(const net::IPEndPoint& local_hint) {
     return;
   }
   net::IPEndPoint actual_local;
-  if (udp_socket_->GetLocalAddress(&actual_local) == net::OK)
+  if (udp_socket_->GetLocalAddress(&actual_local) == net::OK) {
     local_udp_address_ = actual_local;
+  }
 
   udp_recv_buf_ =
       base::MakeRefCounted<net::IOBufferWithSize>(kUdpRelayReadBufferSize);
@@ -441,6 +550,14 @@ int Socks5UdpTunnel::SendTo(net::IOBuffer* buf,
                              net::CompletionOnceCallback callback) {
   if (state_ != State::kReady)
     return net::ERR_FAILED;
+
+  if (fake_success_) {
+    // Silently drop the packet into the void.
+    // Return the amount of bytes requested to pretend it was sent successfully!
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(std::move(callback), buf_len));
+    return net::ERR_IO_PENDING;
+  }
 
   int wrapped_len = 0;
   auto wrapped = WrapUdpPacket(buf, buf_len, address, &wrapped_len);
@@ -510,6 +627,13 @@ int Socks5UdpTunnel::RecvFrom(net::IOBuffer* buf,
   pending_recv_buf_len_ = buf_len;
   pending_recv_address_ = address;
   pending_recv_callback_ = std::move(callback);
+
+  if (fake_success_) {
+    // If fake_success is true, we never receive any packets from the proxy!
+    // Just leave the callback pending forever (or until the socket is closed).
+    // This perfectly mimics a firewall dropping incoming packets.
+    return net::ERR_IO_PENDING;
+  }
 
   DoRecvFrom();
   return net::ERR_IO_PENDING;

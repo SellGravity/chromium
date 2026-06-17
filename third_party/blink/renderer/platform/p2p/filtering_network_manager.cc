@@ -23,6 +23,17 @@ FilteringNetworkManager::FilteringNetworkManager(
                               media_permission,
                               allow_mdns_obfuscation) {}
 
+FilteringNetworkManager::FilteringNetworkManager(
+    IpcNetworkManager* network_manager,
+    media::MediaPermission* media_permission,
+    bool allow_mdns_obfuscation,
+    bool force_mdns_obfuscation)
+    : FilteringNetworkManager(network_manager->AsWeakPtrForSignalingThread(),
+                              media_permission,
+                              allow_mdns_obfuscation) {
+  force_mdns_obfuscation_ = force_mdns_obfuscation;
+}
+
 // DO NOT dereference/check `network_manager_for_signaling_thread` in the ctor!
 // Doing so would bind its WeakFactory to the constructing thread (main thread)
 // instead of the thread `this` lives in (signaling thread).
@@ -115,8 +126,18 @@ webrtc::MdnsResponderInterface* FilteringNetworkManager::GetMdnsResponder()
   if (!network_manager_for_signaling_thread_)
     return nullptr;
 
-  // mDNS responder is set to null if the
+  // mDNS responder is set to null if we have the enumeration permission or the
   // mDNS obfuscation of IPs is disallowed.
+  //
+  // Exception: when force_mdns_obfuscation_ is true (Soft Disable mode), we
+  // ALWAYS return the mDNS responder regardless of enumeration_permission().
+  // This is needed because disable mode uses AlwaysAllowMediaPermission to
+  // get ENUMERATION_ALLOWED (so GetNetworks() exposes real IPs for ICE
+  // binding), but we still want those IPs hashed into xxx.local in the SDP.
+  if (enumeration_permission() == ENUMERATION_ALLOWED &&
+      !force_mdns_obfuscation_) {
+    return nullptr;
+  }
   if (!allow_mdns_obfuscation_) {
     return nullptr;
   }

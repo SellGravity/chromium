@@ -52,11 +52,14 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) Socks5UdpTunnel
     : public net::DatagramServerSocket {
  public:
   // |proxy_endpoint|: address of the SOCKS5 proxy (host:port).
-  // |socket_factory|: used to create the TCP control socket and UDP socket.
-  //                   If null, default factory is used.
   // |net_log|: may be null.
+  // |username|, |password|: optional credentials for SOCKS5
+  //   username/password sub-negotiation (RFC 1929). Pass empty strings for
+  //   unauthenticated proxies.
   Socks5UdpTunnel(const net::IPEndPoint& proxy_endpoint,
-                  net::NetLog* net_log);
+                  net::NetLog* net_log,
+                  std::string username = {},
+                  std::string password = {});
 
   Socks5UdpTunnel(const Socks5UdpTunnel&) = delete;
   Socks5UdpTunnel& operator=(const Socks5UdpTunnel&) = delete;
@@ -124,12 +127,14 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) Socks5UdpTunnel
   // ── State machine ─────────────────────────────────────────────────────────
   enum class State {
     kInit,
-    kConnecting,      // TCP connect to proxy in flight
-    kSendingGreeting, // Writing SOCKS5 greeting (VER NMETHODS METHODS)
-    kReadingChoice,   // Reading proxy method selection
-    kSendingAssoc,    // Writing UDP ASSOCIATE request
-    kReadingReply,    // Reading UDP ASSOCIATE reply
-    kReady,           // Tunnel established, relay_endpoint_ valid
+    kConnecting,       // TCP connect to proxy in flight
+    kSendingGreeting,  // Writing SOCKS5 greeting (VER NMETHODS METHODS)
+    kReadingChoice,    // Reading proxy method selection
+    kSendingAuth,      // Writing RFC 1929 username/password sub-auth
+    kReadingAuthReply, // Reading RFC 1929 auth reply
+    kSendingAssoc,     // Writing UDP ASSOCIATE request
+    kReadingReply,     // Reading UDP ASSOCIATE reply
+    kReady,            // Tunnel established, relay_endpoint_ valid
     kError,
   };
 
@@ -141,6 +146,11 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) Socks5UdpTunnel
   void ReadServerChoice();
   void DoReadServerChoice();
   void OnServerChoiceRead(int result);
+  // RFC 1929 sub-negotiation (only used when proxy selects method 0x02)
+  void SendAuth();
+  void OnAuthSent(int result);
+  void ReadAuthReply();
+  void OnAuthReplyRead(int result);
   void SendAssociateRequest();
   void OnAssociateRequestSent(int result);
   void ReadAssociateReply();
@@ -191,6 +201,11 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) Socks5UdpTunnel
   net::IPEndPoint proxy_endpoint_;
   net::IPEndPoint local_udp_address_;  // filled after BindLocalUdp()
   net::IPEndPoint relay_endpoint_;     // BND.ADDR:BND.PORT from proxy reply
+  bool fake_success_ = false;
+
+  // Optional proxy credentials for RFC 1929 username/password auth.
+  std::string username_;
+  std::string password_;
 
   // TCP control socket (kept alive for the lifetime of the tunnel per RFC 1928)
   std::unique_ptr<net::StreamSocket> control_socket_;
