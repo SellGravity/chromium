@@ -18,6 +18,8 @@
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
+#include "base/command_line.h"
+#include "base/base64.h"
 #include "base/json/json_writer.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram.h"
@@ -26,6 +28,8 @@
 #include "base/strings/escape.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/string_split.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/types/expected_macros.h"
 #include "base/values.h"
 #include "components/device_event_log/device_event_log.h"
@@ -159,6 +163,14 @@ std::vector<mojom::AccessPointDataPtr> RequestToMojom(
 
 mojom::NetworkLocationResponsePtr ResponseToMojom(
     const base::Value::Dict& response_dict) {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    std::optional<double> lat = response_dict.FindDouble("latitude");
+    std::optional<double> lon = response_dict.FindDouble("longitude");
+    if (lat && lon) {
+      return mojom::NetworkLocationResponse::New(*lat, *lon, 10000.0);
+    }
+  }
+
   const auto* location_dict = response_dict.FindDict(kLocationString);
   if (location_dict) {
     auto latitude = location_dict->FindDouble(kLatitudeString);
@@ -240,19 +252,50 @@ void NetworkLocationRequest::MakeRequest(
 
   auto resource_request = std::make_unique<network::ResourceRequest>();
   resource_request->method = "POST";
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    resource_request->method = "GET";
+  }
   resource_request->url = FormRequestURL(api_key_);
+  
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    std::string val = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("location-mode");
+    std::vector<std::string> parts = base::SplitString(val, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    
+    if (parts.size() >= 2) {
+      if (parts[1] == "ip" && base::CommandLine::ForCurrentProcess()->HasSwitch("proxy-server")) {
+        std::string proxy_server = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("proxy-server");
+        size_t host_start = 0;
+        size_t pos = proxy_server.find("://");
+        if (pos != std::string::npos) {
+          host_start = pos + 3;
+        }
+        size_t at_pos = proxy_server.find("@", host_start);
+        if (at_pos != std::string::npos) {
+          host_start = at_pos + 1;
+        }
+        size_t colon_pos = proxy_server.find(":", host_start);
+        std::string proxy_ip = proxy_server.substr(host_start, colon_pos != std::string::npos ? colon_pos - host_start : std::string::npos);
+        
+        // Explicitly ask for proxy IP location
+        resource_request->url = GURL("http://ipwho.is/" + proxy_ip);
+      }
+    }
+  }
+
   DCHECK(resource_request->url.is_valid());
   resource_request->load_flags =
-      net::LOAD_BYPASS_CACHE | net::LOAD_DISABLE_CACHE;
+      net::LOAD_BYPASS_CACHE | net::LOAD_DISABLE_CACHE | net::LOAD_BYPASS_PROXY;
   resource_request->credentials_mode = network::mojom::CredentialsMode::kOmit;
 
   url_loader_ = network::SimpleURLLoader::Create(std::move(resource_request),
                                                  traffic_annotation);
   url_loader_->SetAllowHttpErrorResults(true);
 
-  request_data_ = FormUploadData(wifi_data, wifi_timestamp);
-  std::string upload_data = base::WriteJson(request_data_).value_or("");
-  url_loader_->AttachStringForUpload(upload_data, "application/json");
+  if (!base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    request_data_ = FormUploadData(wifi_data, wifi_timestamp);
+    std::string upload_data = base::WriteJson(request_data_).value_or("");
+    url_loader_->AttachStringForUpload(upload_data, "application/json");
+  }
 
   url_loader_->DownloadToString(
       url_loader_factory_.get(),
@@ -347,6 +390,9 @@ struct AccessPointLess {
 };
 
 GURL FormRequestURL(const std::string& api_key) {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    return GURL("http://ipwho.is/");
+  }
   GURL url(kNetworkLocationBaseUrl);
   if (!api_key.empty()) {
     std::string query(url.GetQuery());
@@ -480,6 +526,20 @@ mojom::GeopositionPtr CreateGeoposition(const base::Value::Dict& response_body,
   if (response_body.empty()) {
     LOG(WARNING) << "CreateGeoposition() : Response was empty.";
     return nullptr;
+  }
+
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    std::optional<double> lat = response_body.FindDouble("latitude");
+    std::optional<double> lon = response_body.FindDouble("longitude");
+    if (lat && lon) {
+      auto position = mojom::Geoposition::New();
+      position->latitude = *lat;
+      position->longitude = *lon;
+      position->accuracy = 100.0;
+      position->timestamp = wifi_timestamp;
+      position->is_precise = true;
+      return position;
+    }
   }
 
   // Get the location

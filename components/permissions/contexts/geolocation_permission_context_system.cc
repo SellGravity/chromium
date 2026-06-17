@@ -10,7 +10,8 @@
 #include "components/content_settings/core/common/features.h"
 #include "content/public/browser/browser_thread.h"
 #include "services/device/public/cpp/geolocation/location_system_permission_status.h"
-
+#include "base/command_line.h"
+#include "base/strings/string_split.h"
 namespace permissions {
 GeolocationPermissionContextSystem::GeolocationPermissionContextSystem(
     content::BrowserContext* browser_context,
@@ -55,6 +56,25 @@ GeolocationPermissionContextSystem::GetPermissionStatusInternal(
     if (std::get<GeolocationSetting>(site_permission).approximate !=
         PermissionOption::kAllowed) {
       return site_permission;
+    }
+  }
+
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    std::string val = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("location-mode");
+    std::vector<std::string> parts = base::SplitString(val, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+    if (!parts.empty()) {
+      if (parts[0] == "block") {
+        return is_permission_content_setting
+                   ? PermissionSetting(CONTENT_SETTING_BLOCK)
+                   : GeolocationSetting(PermissionOption::kDenied,
+                                        PermissionOption::kDenied);
+      } else if (parts[0] == "allow") {
+        return is_permission_content_setting
+                   ? PermissionSetting(CONTENT_SETTING_ALLOW)
+                   : GeolocationSetting(PermissionOption::kAllowed,
+                                        PermissionOption::kAllowed);
+      }
+      // If parts[0] == "ask", do nothing and let it fall through to site_permission
     }
   }
 

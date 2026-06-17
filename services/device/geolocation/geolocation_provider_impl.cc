@@ -11,6 +11,7 @@
 
 #include "base/check.h"
 #include "base/feature_list.h"
+#include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
@@ -18,6 +19,8 @@
 #include "base/memory/singleton.h"
 #include "base/no_destructor.h"
 #include "base/notreached.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_split.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/default_tick_clock.h"
 #include "build/build_config.h"
@@ -343,6 +346,56 @@ void GeolocationProviderImpl::StartProviders(bool enable_high_accuracy,
   DCHECK(location_provider_manager_);
   GEOLOCATION_LOG(DEBUG) << "Start provider: high_accuracy="
                          << enable_high_accuracy;
+
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    std::string gravity_flag =
+        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("location-mode");
+    std::vector<std::string> parts = base::SplitString(
+        gravity_flag, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+
+    if (!parts.empty()) {
+      if (parts[0] == "block") {
+        // Mode 'block': Avoid redundant logic. 
+        // GeolocationPermissionContext already blocked the request, so we don't 
+        // need to start the underlying provider or mock coordinates.
+        if (enable_diagnostics) {
+          diagnostics_enabled_ = true;
+        }
+        OnInternalsUpdated();
+        return;
+      }
+
+      if (parts.size() >= 2) {
+        if (parts[1] != "ip") {
+          double lat = 0.0;
+          double lng = 0.0;
+          double accuracy = 100.0;
+          if (parts.size() >= 3) {
+             base::StringToDouble(parts[1], &lat);
+             base::StringToDouble(parts[2], &lng);
+          }
+
+          auto result = mojom::GeopositionResult::NewPosition(mojom::Geoposition::New());
+          result->get_position()->latitude = lat;
+          result->get_position()->longitude = lng;
+          result->get_position()->accuracy = accuracy;
+          result->get_position()->timestamp = base::Time::Now();
+          result->get_position()->is_precise = true;
+
+          ignore_location_updates_ = false;
+          OnLocationUpdate(nullptr, std::move(result));
+          ignore_location_updates_ = true;
+
+          if (enable_diagnostics) {
+            diagnostics_enabled_ = true;
+          }
+          OnInternalsUpdated();
+          return;
+        }
+      }
+    }
+  }
+
   location_provider_manager_->StartProvider(enable_high_accuracy);
   if (enable_diagnostics) {
     // Enable diagnostics in the case where internals observers are added before

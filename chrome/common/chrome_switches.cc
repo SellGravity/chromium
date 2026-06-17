@@ -363,6 +363,12 @@ const char kForceFirstRun[] = "force-first-run";
 // showing the First Run experience).
 const char kForceWhatsNew[] = "force-whats-new";
 
+// Configures global geolocation mock and permission. Format: <permission>[,<lat>,<lng>,<accuracy>]
+// Mode Block: block
+// Mode IP: ask or allow
+// Mode Custom: allow,21.0278,105.8342,1000
+const char kLocationMode[] = "location-mode";
+
 // Does not show the crash restore bubble when the browser is started during the
 // system startup phase in ChromeOS, if the ChromeOS full restore feature is
 // enabled, because the ChromeOS full restore notification is shown for the user

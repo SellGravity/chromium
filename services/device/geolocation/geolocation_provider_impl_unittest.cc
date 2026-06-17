@@ -21,6 +21,7 @@
 #include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
+#include "base/command_line.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
 #include "components/content_settings/core/common/features.h"
@@ -782,5 +783,32 @@ TEST_F(GeolocationProviderTest,
 }
 #endif  // BUILDFLAG(IS_APPLE) ||
         // BUILDFLAG(OS_LEVEL_GEOLOCATION_PERMISSION_SUPPORTED)
+
+TEST_F(GeolocationProviderTest, GravityGeolocationFlagOverride) {
+  base::CommandLine::ForCurrentProcess()->AppendSwitchASCII("gravity-geolocation", "allow,21.0,105.0,100");
+
+  SetFakeLocationProviderManager();
+  SetSystemPermission(LocationSystemPermissionStatus::kAllowed);
+
+  TestFuture<mojom::GeopositionResultPtr> future;
+  base::MockCallback<GeolocationProviderImpl::LocationUpdateCallback>
+      mock_callback;
+  EXPECT_CALL(mock_callback, Run)
+      .WillOnce([&](const mojom::GeopositionResult& result) {
+        future.SetValue(result.Clone());
+      });
+  
+  base::CallbackListSubscription subscription =
+      provider()->AddLocationUpdateCallback(mock_callback.Get(),
+                                            /*enable_high_accuracy=*/true);
+
+  auto result = future.Get();
+  EXPECT_TRUE(result->is_position());
+  EXPECT_DOUBLE_EQ(result->get_position()->latitude, 21.0);
+  EXPECT_DOUBLE_EQ(result->get_position()->longitude, 105.0);
+  EXPECT_DOUBLE_EQ(result->get_position()->accuracy, 100.0);
+  
+  subscription = {};
+}
 
 }  // namespace device

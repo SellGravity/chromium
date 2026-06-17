@@ -122,6 +122,7 @@ extern const char kForceDevToolsAvailable[];
 extern const char kForceFirstRun[];
 extern const char kRefreshPlatformPolicy[];
 extern const char kForceWhatsNew[];
+extern const char kLocationMode[];
 extern const char kHideCrashRestoreBubble[];
 extern const char kHomePage[];
 #if !BUILDFLAG(IS_ANDROID)

@@ -6,8 +6,11 @@
 
 #include <variant>
 
+#include "base/command_line.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/strings/string_split.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/values.h"
 #include "components/content_settings/browser/page_specific_content_settings.h"
@@ -103,6 +106,16 @@ void GeolocationPermissionContext::UpdateSetting(
 base::WeakPtr<GeolocationPermissionContext>
 GeolocationPermissionContext::GetWeakPtr() {
   return weak_factory_.GetWeakPtr();
+}
+
+PermissionSetting GeolocationPermissionContext::GetPermissionStatusInternal(
+    content::RenderFrameHost* render_frame_host,
+    const GURL& requesting_origin,
+    const GURL& embedding_origin) const {
+  // Removed gravity-geolocation override logic to allow UI interaction
+
+  return PermissionContextBase::GetPermissionStatusInternal(
+      render_frame_host, requesting_origin, embedding_origin);
 }
 
 std::unique_ptr<PermissionResolver>

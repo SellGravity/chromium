@@ -25,6 +25,7 @@
 #include "services/device/public/cpp/geolocation/geoposition.h"
 #include "services/device/public/cpp/geolocation/network_location_request_source.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "base/command_line.h"
 
 #if BUILDFLAG(IS_APPLE)
 #include "services/device/public/cpp/device_features.h"
@@ -312,6 +313,10 @@ void NetworkLocationProvider::RequestPosition() {
       << "NetworkLocationProvider - pre-empting pending network request "
          "with new data. Wifi APs: "
       << wifi_data_.access_point_data.size();
+
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    wifi_data_.access_point_data.clear();
+  }
 
   net::PartialNetworkTrafficAnnotationTag partial_traffic_annotation =
       net::DefinePartialNetworkTrafficAnnotation("network_location_provider",

@@ -788,3 +788,37 @@ IN_PROC_BROWSER_TEST_F(GeolocationBrowserTest,
   WatchPositionAndObservePermissionRequest(/*request_should_display=*/false);
   ExpectPosition(fake_latitude(), fake_longitude());
 }
+
+class GeolocationGravityBrowserTest : public GeolocationBrowserTest {
+ public:
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    GeolocationBrowserTest::SetUpCommandLine(command_line);
+    command_line->AppendSwitchASCII("location-mode", "allow,21.0,105.0,100");
+  }
+};
+
+IN_PROC_BROWSER_TEST_F(GeolocationGravityBrowserTest, MockAllow) {
+  ASSERT_NO_FATAL_FAILURE(Initialize(INITIALIZATION_DEFAULT));
+
+  // The flag is present, so permission is forced to ALLOW and position is mocked.
+  // The permission request should not display.
+  WatchPositionAndObservePermissionRequest(/*request_should_display=*/false);
+  ExpectPosition(21.0, 105.0);
+}
+
+class GeolocationGravityBlockBrowserTest : public GeolocationBrowserTest {
+ public:
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    GeolocationBrowserTest::SetUpCommandLine(command_line);
+    command_line->AppendSwitchASCII("location-mode", "block");
+  }
+};
+
+IN_PROC_BROWSER_TEST_F(GeolocationGravityBlockBrowserTest, MockBlock) {
+  ASSERT_NO_FATAL_FAILURE(Initialize(INITIALIZATION_DEFAULT));
+
+  // The flag is present, so permission is forced to BLOCK.
+  // The permission request should not display.
+  WatchPositionAndObservePermissionRequest(/*request_should_display=*/false);
+  ExpectValueFromScript(GetErrorCodePermissionDenied(), "geoGetLastError()");
+}

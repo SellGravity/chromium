@@ -89,6 +89,11 @@ class GeolocationPermissionContext : public PermissionContextBase {
 
   base::WeakPtr<GeolocationPermissionContext> GetWeakPtr();
 
+  PermissionSetting GetPermissionStatusInternal(
+      content::RenderFrameHost* render_frame_host,
+      const GURL& requesting_origin,
+      const GURL& embedding_origin) const override;
+
   // Make this public for use by the delegate implementation.
   using PermissionContextBase::NotifyPermissionSet;
 

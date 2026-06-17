@@ -23,6 +23,7 @@
 #include "services/device/public/cpp/geolocation/geoposition.h"
 #include "services/device/public/mojom/geolocation_internals.mojom.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "base/command_line.h"
 
 namespace device {
 
@@ -98,6 +99,11 @@ LocationProviderManager::LocationProviderManager(
   // On macOS / Windows platforms, use the mode specified by the feature flag.
   provider_manager_mode_ = features::kLocationProviderManagerParam.Get();
 #endif
+
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
+    provider_manager_mode_ = kNetworkOnly;
+  }
+
   GEOLOCATION_LOG(DEBUG) << "LocationProviderManager::LocationProviderManager: "
                             "provider_manager_mode_ is initialized to "
                          << LocationProviderManagerModeAsString(
