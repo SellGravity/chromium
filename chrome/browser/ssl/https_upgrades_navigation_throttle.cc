@@ -11,6 +11,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "base/command_line.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ssl/https_first_mode_settings_tracker.h"
 #include "chrome/browser/ssl/https_only_mode_tab_helper.h"
@@ -105,6 +106,9 @@ HttpsUpgradesNavigationThrottle::~HttpsUpgradesNavigationThrottle() = default;
 
 content::NavigationThrottle::ThrottleCheckResult
 HttpsUpgradesNavigationThrottle::WillStartRequest() {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("proxy-server")) {
+    return content::NavigationThrottle::PROCEED; 
+  }
   // If the navigation is fallback to HTTP, trigger the HTTP interstitial (if
   // enabled). The interceptor creates a redirect for the fallback navigation,
   // which will trigger MaybeCreateLoader() in the interceptor for the redirect
