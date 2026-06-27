@@ -1065,23 +1065,24 @@ static String SanitizeSdp(const String& sdp, const std::string& proxy_ip_raw, in
           bool raddr_already_correct = raddr_it != parts.end() &&
                                         (raddr_it + 1) != parts.end() &&
                                         *(raddr_it + 1) == proxy_ip;
-          if (!raddr_already_correct) {
+          
+          if (!raddr_already_correct || (is_replace_mode && parts[4] != proxy_ip)) {
             // We are rewriting this candidate in place (not duplicating it
-            // like srflx above), so its foundation is untouched: a relay
-            // candidate's foundation only depends on type/base
-            // address/protocol/relay_protocol, none of which we change here.
-            // (An earlier revision appended a digit to the foundation
-            // string, which is the same invalid-range bug already fixed for
-            // srflx above — a real CRC32-derived foundation never exceeds 10
-            // decimal digits, so blindly appending one can produce a value
-            // no genuine Chrome foundation could ever take.)
+            // like srflx above), so its foundation is untouched.
 
-            // DO NOT touch parts[4] because it is the TURN server's IP.
+            // In replace mode, explicitly overwrite the TURN server's IP to match proxy_ip.
+            // This is a cosmetic brute-force to satisfy strict JS fingerprinting,
+            // even though it breaks logical consistency with the requested TURN server.
+            // This does NOT affect forward mode.
+            if (is_replace_mode && parts.size() > 4) {
+              parts[4] = proxy_ip;
+            }
+
             // BUT the raddr of a relay candidate leaks the STUN/srflx IP (which is the real IP).
             // Since we spoofed the srflx IP to be proxy_ip, we MUST spoof the relay raddr to be proxy_ip!
             if (raddr_it != parts.end() && (raddr_it + 1) != parts.end()) {
               *(raddr_it + 1) = proxy_ip;
-            } else {
+            } else if (raddr_it == parts.end()) {
               parts.push_back("raddr");
               parts.push_back(proxy_ip);
             }
