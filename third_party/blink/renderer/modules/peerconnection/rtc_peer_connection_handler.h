@@ -36,6 +36,8 @@
 #include "third_party/blink/renderer/platform/peerconnection/rtc_session_description_request.h"
 #include "third_party/blink/renderer/platform/peerconnection/rtc_stats.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
+#include "third_party/blink/renderer/platform/wtf/hash_map.h"
+#include "third_party/blink/renderer/platform/wtf/hash_set.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 #include "third_party/webrtc/api/peer_connection_interface.h"
@@ -287,6 +289,17 @@ class MODULES_EXPORT RTCPeerConnectionHandler {
   void OnInterestingUsage(int usage_pattern);
 
  private:
+  // When forward mode is using a non-SOCKS5 proxy, force_no_udp_egress (see
+  // peer_connection_dependency_factory.cc) guarantees zero real local ICE
+  // candidates ever get gathered (no real Port/socket exists at all, so no
+  // ICE connectivity check can leak the real IP). That also means
+  // OnIceCandidate() never fires natively. Called from OnIceGatheringChange
+  // when gathering completes with nothing produced, this synthesizes a fake
+  // host+srflx candidate triplet as JS-facing onicecandidate events (and as
+  // part of localDescription.sdp via SanitizeSdp), so the connection still
+  // looks like genuine NAT'd Chrome instead of producing zero candidates.
+  void MaybeFabricateForwardModeCandidates();
+
   // Record info about the first SessionDescription from the local and
   // remote side to record UMA stats once both are set.
   struct FirstSessionDescription {
@@ -441,6 +454,44 @@ class MODULES_EXPORT RTCPeerConnectionHandler {
       ice_state_seen_ = {};
 
   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
+
+  int srflx_candidate_count_ = 0;
+
+  // sdp_mline_index values for which SanitizeSdp's trickle call site has
+  // already derived a fake srflx pair from a real host candidate (the
+  // SOCKS5-ASSOCIATE-fails-at-runtime / no-real-STUN-ever case). Keyed per
+  // m-line because a connection can have several INDEPENDENTLY gathered
+  // transports (e.g. audio/video/application each with their own host
+  // candidates, not unified under one BUNDLEd transport) — each one needs
+  // its own derived pair, not just the first m-line ever seen. Reset
+  // alongside |srflx_candidate_count_| on a new ICE generation.
+  HashSet<int> host_derived_srflx_mlines_;
+
+  // Per-m-line count of REAL native srflx candidates (address already equals
+  // the proxy IP) that SanitizeSdp's trickle call site has let through so
+  // far, keyed by sdp_mline_index + 1 (see host_derived_srflx_mlines_ for why
+  // the +1 offset is required). A connection with several independently
+  // gathered transports (e.g. audio/video/application) genuinely produces 2
+  // real srflx PER m-line when the SOCKS5 UDP tunnel works end-to-end, so the
+  // cap-at-2 must be applied per m-line, not once for the whole connection —
+  // otherwise later m-lines' genuine srflx get dropped once the connection-
+  // wide budget is spent by earlier m-lines. Reset alongside
+  // |host_derived_srflx_mlines_| on a new ICE generation.
+  HashMap<int, int> trickle_native_srflx_count_;
+
+  // Per-m-line priority (RFC 5245 field) of the FIRST real native srflx
+  // candidate let through for that transport, keyed the same way as
+  // |trickle_native_srflx_count_|. The second native srflx for the same
+  // transport always arrives from NoEgressUdpSocket's synthetic STUN
+  // responder with the IDENTICAL priority as the first — a bug in that
+  // responder's candidate construction (it doesn't carry through the
+  // second socket's own network preference) — whereas genuine multi-homed
+  // Chrome's second interface's srflx priority differs from the first's by
+  // exactly 2560 (confirmed via real packet captures; see
+  // kSecondCandidatePriorityDelta). Remembering the first's priority here
+  // lets SanitizeSdp reproduce that same fixed delta for the second one
+  // instead of leaving both identical.
+  HashMap<int, unsigned> trickle_native_srflx_first_priority_;
 
   base::WeakPtrFactory<RTCPeerConnectionHandler> weak_factory_{this};
 };

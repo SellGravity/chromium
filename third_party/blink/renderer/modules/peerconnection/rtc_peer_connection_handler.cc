@@ -26,6 +26,7 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/stringprintf.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
@@ -81,6 +82,7 @@
 #include "third_party/webrtc/api/rtc_event_log_output.h"
 #include "third_party/webrtc/api/units/time_delta.h"
 #include "third_party/webrtc/pc/session_description.h"
+#include "third_party/webrtc/rtc_base/crc32.h"
 
 using webrtc::DataChannelInterface;
 using webrtc::IceCandidate;
@@ -146,23 +148,553 @@ static std::string GetWebRtcSdpProxyIp(
     return {};
   }
 
-  // Only --webrtc-proxy-ip triggers Blink-layer SDP sanitization (Luong 1).
-  // --webrtc-mode=forward_udp (Luong 2) tunnels UDP at the C++ network layer;
-  // the SDP reflects the tunnel's real exit IP naturally. Never tamper with it
-  // here — double-editing (C++ tunnel + Blink SanitizeSdp) creates corrupt SDP.
+  // Priority 1: Explicit --webrtc-proxy-ip flag (user provides the desired IP directly).
   if (command_line->HasSwitch("webrtc-proxy-ip")) {
     return command_line->GetSwitchValueASCII("webrtc-proxy-ip");
+  }
+
+  // Priority 2: Auto-detect from --proxy-server flag.
+  // This handles both HTTP proxy (http://IP:port) and SOCKS5 proxy (socks5://IP:port).
+  // We extract the IP/host portion to use as the replacement IP in SDP sanitization.
+  // NOTE: this runs for both "replace" and "forward" modes. For "forward" with a
+  // SOCKS5 proxy, the network layer (Socks5UdpTunnel) already produces candidates
+  // carrying the correct proxy IP, so SanitizeSdp below is normally a no-op for
+  // those candidates — but it still runs unconditionally as a safety net: if the
+  // SOCKS5 UDP ASSOCIATE handshake fails, P2PSocketUdp transparently falls back to
+  // a native unproxied socket (see services/network/p2p/socket_udp.cc), which would
+  // otherwise leak the real IP into the candidate. SanitizeSdp catches that case too.
+  if (command_line->HasSwitch("webrtc-mode") &&
+      command_line->HasSwitch("proxy-server")) {
+    std::string mode = command_line->GetSwitchValueASCII("webrtc-mode");
+    if (mode == "replace" || mode == "forward") {
+      std::string proxy_str = command_line->GetSwitchValueASCII("proxy-server");
+
+    // Strip known scheme prefixes
+    for (const char* prefix : {"socks5://", "socks4://", "http://", "https://"}) {
+      if (proxy_str.rfind(prefix, 0) == 0) {
+        proxy_str = proxy_str.substr(strlen(prefix));
+        break;
+      }
+    }
+    
+    // Strip user:pass@ credentials if present
+    size_t at_pos = proxy_str.find('@');
+    if (at_pos != std::string::npos) {
+      proxy_str = proxy_str.substr(at_pos + 1);
+    }
+    
+    // Now proxy_str is "host:port" or "[ipv6]:port" or just "host"
+    // Extract the host/IP portion (strip the port)
+    if (!proxy_str.empty() && proxy_str[0] == '[') {
+      // IPv6 literal: [::1]:1080
+      size_t close = proxy_str.find(']');
+      if (close != std::string::npos) {
+        proxy_str = proxy_str.substr(1, close - 1);
+      }
+    } else {
+      // IPv4 or hostname: 1.2.3.4:1080
+      size_t colon = proxy_str.rfind(':');
+      if (colon != std::string::npos) {
+        // Only strip if there's exactly one colon (IPv4:port), not IPv6
+        if (std::count(proxy_str.begin(), proxy_str.end(), ':') == 1) {
+          proxy_str = proxy_str.substr(0, colon);
+        }
+      }
+    }
+    
+    if (!proxy_str.empty()) {
+      VLOG(3) << "WebRTC replace mode: auto-detected proxy IP from --proxy-server: " << proxy_str;
+      return proxy_str;
+    }
+    } // Closes if (mode == "replace" || mode == "forward")
   }
 
   return {};
 }
 
-static String SanitizeSdp(const String& sdp, const std::string& proxy_ip_raw) {
+// "replace" mode runs WebRTC's gathering completely unmodified (real STUN,
+// real public-IP srflx) and only rewrites the leaked IP text afterward — as
+// opposed to "forward" mode, which tunnels real traffic through a proxy (or,
+// for non-SOCKS5 proxies, fabricates candidates from scratch). SanitizeSdp's
+// typ=="srflx" branch needs to tell these apart: forward mode's
+// BuildFakeSrflxPair call there exists to synthesize a believable multi-
+// homed-looking PAIR when no second real srflx exists yet (see that call's
+// own comment) — replace mode already has a genuinely real, singular srflx
+// per host that just needs its address text swapped, so reusing forward
+// mode's pairing logic for replace mode fabricates an extra candidate that
+// was never in genuine Chrome's actual output for that connection.
+static bool IsReplaceMode(const base::CommandLine* command_line) {
+  return command_line && command_line->HasSwitch("webrtc-mode") &&
+         command_line->GetSwitchValueASCII("webrtc-mode") == "replace";
+}
+
+// Mirrors the is_socks5 literal-IP check in
+// peer_connection_dependency_factory.cc's CreatePortAllocator(), which
+// decides force_no_udp_egress (disabling STUN at the network layer because
+// HTTP/SOCKS4/hostname proxies can't tunnel UDP). When that check is false
+// there, no real srflx candidate will ever be gathered for this connection,
+// so SanitizeSdp needs to know to fabricate one from a host candidate
+// instead of waiting for (and duplicating) a real one.
+static bool IsForwardModeUsingNonSocks5Proxy(
+    const base::CommandLine* command_line) {
+  if (!command_line || !command_line->HasSwitch("webrtc-mode") ||
+      command_line->GetSwitchValueASCII("webrtc-mode") != "forward" ||
+      !command_line->HasSwitch("proxy-server")) {
+    return false;
+  }
+  std::string proxy_str = command_line->GetSwitchValueASCII("proxy-server");
+  const char kSocks5Prefix[] = "socks5://";
+  constexpr size_t kSocks5PrefixLen = sizeof(kSocks5Prefix) - 1;
+  if (proxy_str.length() < kSocks5PrefixLen ||
+      !std::equal(proxy_str.begin(), proxy_str.begin() + kSocks5PrefixLen,
+                  kSocks5Prefix,
+                  [](char a, char b) { return tolower(a) == b; })) {
+    return true;  // Not socks5:// at all.
+  }
+  std::string host_port_str = proxy_str.substr(kSocks5PrefixLen);
+  auto at_pos = host_port_str.rfind('@');
+  if (at_pos != std::string::npos) {
+    host_port_str = host_port_str.substr(at_pos + 1);
+  }
+  while (!host_port_str.empty() && host_port_str.back() == '/') {
+    host_port_str.pop_back();
+  }
+  auto colon_pos = host_port_str.rfind(':');
+  std::string host_only = (colon_pos != std::string::npos)
+                               ? host_port_str.substr(0, colon_pos)
+                               : host_port_str;
+  if (!host_only.empty() && host_only.front() == '[' &&
+      host_only.back() == ']') {
+    host_only = host_only.substr(1, host_only.length() - 2);
+  }
+  for (char c : host_only) {
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F') || c == '.' || c == ':')) {
+      return true;  // Hostname, not an IP literal -> can't be tunneled.
+    }
+  }
+  return false;  // socks5:// with an IP literal -> real tunnel will be used.
+}
+
+// Builds a fake 2-candidate srflx pair (one with raddr 0.0.0.0, one with
+// raddr=proxy_ip) from |seed_parts| — the space-split fields of a real
+// candidate line. |seed_parts| can be either a real srflx candidate
+// (priority_type_delta=0) or, when no real srflx will ever be gathered
+// (force_no_udp_egress / non-SOCKS5 forward-mode proxy — see
+// peer_connection_dependency_factory.cc), a host candidate's fields used as
+// the closest real network event to derive a believable srflx from
+// (priority_type_delta = ICE_TYPE_PREFERENCE_HOST - ICE_TYPE_PREFERENCE_SRFLX
+// = 26, per third_party/webrtc/p2p/base/p2p_constants.h, shifted into the
+// priority formula's top byte).
+static void BuildFakeSrflxPair(const std::vector<std::string>& seed_parts,
+                                const std::string& proxy_ip,
+                                bool is_ipv6,
+                                uint32_t priority_type_delta,
+                                std::string* cand1,
+                                std::string* cand2) {
+  // Candidate 1: raddr 0.0.0.0, foundation/component untouched (only valid
+  // when seed is already srflx; for a host seed we still inherit its real,
+  // in-range foundation rather than fabricating one for this slot, exactly
+  // mirroring how a genuine second-NIC srflx would carry its own foundation).
+  std::vector<std::string> parts1 = seed_parts;
+  std::string prefix = parts1[0].substr(0, parts1[0].find(':') + 1);
+  std::string foundation = parts1[0].substr(parts1[0].find(':') + 1);
+  parts1[4] = proxy_ip;
+  parts1[7] = "srflx";
+
+  uint32_t prio1 = 0;
+  if (base::StringToUint(parts1[3], &prio1)) {
+    prio1 -= priority_type_delta << 24;
+    parts1[3] = base::NumberToString(prio1);
+  }
+
+  auto raddr1_it = std::find(parts1.begin(), parts1.end(), "raddr");
+  if (raddr1_it != parts1.end() && (raddr1_it + 1) != parts1.end()) {
+    *(raddr1_it + 1) = is_ipv6 ? "::" : "0.0.0.0";
+  } else {
+    // Insert right after "typ TYPE" (index 8), not at the end. Real
+    // Chrome's canonical attribute order is "typ TYPE raddr R rport P
+    // generation G ufrag U network-cost C" — appending at the end (this
+    // function's previous behavior) breaks that when the seed has no
+    // raddr/rport already, e.g. a host candidate seed for the
+    // SOCKS5-ASSOCIATE-fail derive path, producing a visibly wrong
+    // "generation 0 ufrag X network-cost 999 raddr ... rport ..." order.
+    parts1.insert(parts1.begin() + 8, {"raddr", is_ipv6 ? "::" : "0.0.0.0"});
+  }
+  auto rport1_it = std::find(parts1.begin(), parts1.end(), "rport");
+  if (rport1_it != parts1.end() && (rport1_it + 1) != parts1.end()) {
+    *(rport1_it + 1) = "0";
+  } else {
+    auto raddr1_it2 = std::find(parts1.begin(), parts1.end(), "raddr");
+    size_t insert_idx = (raddr1_it2 != parts1.end())
+                             ? (raddr1_it2 - parts1.begin() + 2)
+                             : 8;
+    parts1.insert(parts1.begin() + insert_idx, {"rport", "0"});
+  }
+
+  // Candidate 2: raddr=proxy_ip. Foundation must look like an independent
+  // real candidate's, i.e. a plausible CRC32 output (real Chrome foundations
+  // are always <= 4294967295 — at most 10 decimal digits), so we hash an
+  // analogous, distinguishing string through the same CRC32 routine WebRTC
+  // uses rather than mutating the original foundation string directly.
+  std::vector<std::string> parts2 = parts1;
+  std::string second_seed = "srflx" + proxy_ip + "udp" + foundation;
+  uint32_t second_foundation_crc = webrtc::ComputeCrc32(second_seed);
+  parts2[0] = prefix + base::NumberToString(second_foundation_crc);
+
+  auto raddr2_it = std::find(parts2.begin(), parts2.end(), "raddr");
+  if (raddr2_it != parts2.end() && (raddr2_it + 1) != parts2.end()) {
+    *(raddr2_it + 1) = proxy_ip;
+  }
+
+  // Vary priority/port to simulate a second adapter, using the EXACT fixed
+  // delta genuine Chrome uses — confirmed from real packet captures of two
+  // genuine host candidates gathered on the same machine: priority always
+  // differs by exactly 2560 (= 10 * 256, i.e. local_pref rank differs by 10)
+  // and port is always exactly +1 (two sequentially-bound sockets). This is
+  // NOT a per-session/per-candidate random or pseudo-random value: real
+  // Chrome's own pairing is this exact fixed delta every time, on every
+  // machine, so reproducing it exactly is what matches genuine output —
+  // varying it would itself be the deviation from real Chrome.
+  static constexpr uint32_t kSecondCandidatePriorityDelta = 2560;
+  static constexpr uint32_t kSecondCandidatePortDelta = 1;
+  uint32_t prio2 = 0;
+  if (base::StringToUint(parts2[3], &prio2)) {
+    parts2[3] = base::NumberToString(prio2 + kSecondCandidatePriorityDelta);
+  }
+  uint32_t port2 = 0;
+  if (base::StringToUint(parts2[5], &port2) && port2 > 0) {
+    uint32_t new_port = port2 + kSecondCandidatePortDelta;
+    if (new_port > 65535) {
+      new_port = port2 - kSecondCandidatePortDelta;
+    }
+    parts2[5] = base::NumberToString(new_port);
+  }
+
+  auto join = [](const std::vector<std::string>& p) {
+    std::string s;
+    for (size_t i = 0; i < p.size(); ++i) {
+      if (i > 0) s += " ";
+      s += p[i];
+    }
+    return s;
+  };
+  *cand1 = join(parts1);
+  *cand2 = join(parts2);
+}
+
+// Extracts the value of the first "a=ice-ufrag:" line found in |sdp|, or an
+// empty string if none exists. The ICE ufrag is stable for the lifetime of
+// one ICE generation (only changes on an ICE restart), so it doubles as a
+// natural per-session seed for fabricating candidates deterministically.
+static std::string ExtractIceUfrag(const std::string& sdp) {
+  const char kUfragPrefix[] = "a=ice-ufrag:";
+  size_t pos = sdp.find(kUfragPrefix);
+  if (pos == std::string::npos) {
+    return {};
+  }
+  pos += strlen(kUfragPrefix);
+  size_t end = sdp.find_first_of("\r\n", pos);
+  return sdp.substr(pos, end == std::string::npos ? std::string::npos
+                                                    : end - pos);
+}
+
+// Fabricates a believable host+srflx candidate triplet entirely from
+// scratch, deriving every field deterministically (via CRC32) from |ufrag|
+// instead of from real network state or randomness. Used when forward mode
+// is using a non-SOCKS5 proxy: force_no_udp_egress (see
+// peer_connection_dependency_factory.cc) guarantees libwebrtc never creates
+// a single real local Port for this connection (so no real ICE connectivity
+// check can ever leak the real IP), which also means there is no real host
+// candidate left to seed BuildFakeSrflxPair from. Deriving purely from
+// |ufrag| (rather than base::RandInt/base::Uuid) means this function
+// produces byte-identical output no matter which of the two independent
+// call sites invokes it — RTCPeerConnectionHandler::
+// MaybeFabricateForwardModeCandidates (trickled onicecandidate events) and
+// SanitizeSdp's full-SDP finalization below (pc.localDescription.sdp) — so
+// the two never visibly disagree about what the "same" candidate looks like.
+static std::vector<std::string> BuildFabricatedHostParts(
+    const std::string& ufrag,
+    uint32_t foundation_crc,
+    uint32_t host_priority,
+    uint32_t host_port,
+    uint32_t uuid_seed_a,
+    uint32_t uuid_seed_b) {
+  // Shaped like a real UUID v4 (genuine Chrome's mDNS-obfuscated host
+  // candidate hostname), not a real RFC 4122 UUID — just needs to look like
+  // one in the SDP.
+  std::string host_address = base::StringPrintf(
+      "%08x-%04x-4%03x-%04x-%08x%04x.local", uuid_seed_a,
+      (uuid_seed_a >> 16) & 0xFFFFu, uuid_seed_b & 0xFFFu,
+      0x8000u | ((uuid_seed_b >> 16) & 0x3FFFu), foundation_crc,
+      host_port & 0xFFFFu);
+
+  std::vector<std::string> host_parts = {
+      "candidate:" + base::NumberToString(foundation_crc),
+      "1",
+      "udp",
+      base::NumberToString(host_priority),
+      host_address,
+      base::NumberToString(host_port),
+      "typ",
+      "host",
+      "generation",
+      "0",
+  };
+  if (!ufrag.empty()) {
+    host_parts.push_back("ufrag");
+    host_parts.push_back(ufrag);
+  }
+  host_parts.push_back("network-cost");
+  host_parts.push_back("999");
+  return host_parts;
+}
+
+static std::string JoinParts(const std::vector<std::string>& parts) {
+  std::string s;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (i > 0) s += " ";
+    s += parts[i];
+  }
+  return s;
+}
+
+// True if |address| is already a genuine-Chrome-style mDNS-obfuscated
+// hostname (a UUID-shaped name ending in ".local"), as opposed to a raw IP
+// literal. Chromium's native mDNS hiding does not fire for an opaque origin
+// (e.g. about:blank) — when it doesn't, a host candidate's address field is
+// the real local IP/IPv6 literal, exactly the leak this forward-mode feature
+// exists to prevent. This is the check for that safety net below.
+static bool IsMdnsHostname(const std::string& address) {
+  return address.size() > 6 &&
+         address.compare(address.size() - 6, 6, ".local") == 0;
+}
+
+// Masks a real local address that leaked into a host candidate's address
+// field (see IsMdnsHostname's comment) with a synthetic UUID-shaped ".local"
+// hostname, deterministically derived from the real address so repeated SDP
+// reads of the same candidate (full-sdp vs trickle call sites, multiple
+// localDescription.sdp reads) produce the identical mask.
+static std::string MaskRealHostAddress(const std::string& real_address) {
+  uint32_t seed_a = webrtc::ComputeCrc32("mask-host-addr-a:" + real_address);
+  uint32_t seed_b = webrtc::ComputeCrc32("mask-host-addr-b:" + real_address);
+  return base::StringPrintf(
+      "%08x-%04x-4%03x-%04x-%08x%04x.local", seed_a,
+      (seed_a >> 16) & 0xFFFFu, seed_b & 0xFFFu,
+      0x8000u | ((seed_b >> 16) & 0x3FFFu), seed_a, seed_b & 0xFFFFu);
+}
+
+// Fabricates a believable 2-host + 2-srflx candidate set entirely from
+// scratch, deriving every field deterministically (via CRC32) from |ufrag|
+// instead of from real network state or randomness. Used when forward mode
+// is using a non-SOCKS5 proxy: force_no_udp_egress (see
+// peer_connection_dependency_factory.cc) guarantees libwebrtc never creates
+// a single real local Port for this connection (so no real ICE connectivity
+// check can ever leak the real IP), which also means there is no real host
+// candidate left to seed BuildFakeSrflxPair from. Deriving purely from
+// |ufrag| (rather than base::RandInt/base::Uuid) means this function
+// produces byte-identical output no matter which of the two independent
+// call sites invokes it — RTCPeerConnectionHandler::
+// MaybeFabricateForwardModeCandidates (trickled onicecandidate events) and
+// SanitizeSdp's full-SDP finalization below (pc.localDescription.sdp) — so
+// the two never visibly disagree about what the "same" candidate looks like.
+//
+// |host_line2| mirrors the second host candidate genuine multi-homed Chrome
+// almost always also gathers (confirmed from real packet captures of two
+// genuine host candidates on the same machine): its priority and port are
+// exactly host1's + the same fixed deltas (2560 / +1) BuildFakeSrflxPair
+// uses for the srflx pair — see its comment for why this is a fixed,
+// reproduced-exactly delta rather than a randomized one. No srflx is derived
+// from host_line2; only host1 seeds the srflx pair, to keep exactly 2 srflx
+// total regardless of host-candidate count.
+static void FabricateHostAndSrflxTriplet(const std::string& ufrag,
+                                          const std::string& proxy_ip,
+                                          bool is_ipv6,
+                                          std::string* host_line,
+                                          std::string* host_line2,
+                                          std::string* srflx1,
+                                          std::string* srflx2) {
+  uint32_t foundation_crc = webrtc::ComputeCrc32("fabricated-host:" + ufrag);
+  // Real Chrome's host candidate local_pref is small (network-interface
+  // ranking, not a port/random value) — confirmed from real packet captures
+  // showing local_pref values like 30/40 for two host candidates on the same
+  // machine (priorities 2113937151/2113939711, delta exactly 2560 = 10*256).
+  // The full 16-bit range (0-65535) this used to draw from produced
+  // local_pref values like 45172, which no genuine network ranking algorithm
+  // would ever assign — bound it to the same small, believable range real
+  // Chrome's local_pref actually occupies.
+  uint32_t local_pref =
+      1 + webrtc::ComputeCrc32("fabricated-local-pref:" + ufrag) % 100;
+  uint32_t host_priority = (126u << 24) | (local_pref << 8) | 255u;
+  uint32_t port_seed = webrtc::ComputeCrc32("fabricated-port:" + ufrag);
+  uint32_t host_port = 1024 + (port_seed % (65536 - 1024));
+  uint32_t uuid_seed_a = webrtc::ComputeCrc32("fabricated-uuid-a:" + ufrag);
+  uint32_t uuid_seed_b = webrtc::ComputeCrc32("fabricated-uuid-b:" + ufrag);
+
+  std::vector<std::string> host_parts = BuildFabricatedHostParts(
+      ufrag, foundation_crc, host_priority, host_port, uuid_seed_a,
+      uuid_seed_b);
+  *host_line = JoinParts(host_parts);
+
+  static constexpr uint32_t kSecondHostPriorityDelta = 2560;
+  static constexpr uint32_t kSecondHostPortDelta = 1;
+  uint32_t foundation_crc2 =
+      webrtc::ComputeCrc32("fabricated-host2:" + ufrag);
+  uint32_t uuid_seed_a2 = webrtc::ComputeCrc32("fabricated-uuid-a2:" + ufrag);
+  uint32_t uuid_seed_b2 = webrtc::ComputeCrc32("fabricated-uuid-b2:" + ufrag);
+  uint32_t host_port2 = host_port + kSecondHostPortDelta;
+  if (host_port2 > 65535) {
+    host_port2 = host_port - kSecondHostPortDelta;
+  }
+  *host_line2 = JoinParts(BuildFabricatedHostParts(
+      ufrag, foundation_crc2, host_priority + kSecondHostPriorityDelta,
+      host_port2, uuid_seed_a2, uuid_seed_b2));
+
+  BuildFakeSrflxPair(host_parts, proxy_ip, is_ipv6, /*priority_type_delta=*/26,
+                      srflx1, srflx2);
+}
+
+static String SanitizeSdp(const String& sdp, const std::string& proxy_ip_raw, int* shared_srflx_count = nullptr, std::vector<std::string>* extra_candidates = nullptr, bool fabricate_srflx_from_host = false, HashSet<int>* trickle_mline_srflx_done = nullptr, int sdp_mline_index = 0, HashMap<int, int>* trickle_native_srflx_count = nullptr, HashMap<int, unsigned>* trickle_native_srflx_first_priority = nullptr, bool is_replace_mode = false) {
   std::string sdp_str = sdp.Utf8();
   if (proxy_ip_raw.empty()) return sdp;
 
   std::string proxy_ip = NormalizeProxyIp(proxy_ip_raw);
   bool is_ipv6 = proxy_ip.find(':') != std::string::npos;
+
+  int local_srflx_count = 0;
+  int* srflx_count = shared_srflx_count ? shared_srflx_count : &local_srflx_count;
+  // Set when a "typ host" line is found anywhere in |sdp|. Tracked
+  // separately from |*srflx_count| (which also gates the unrelated
+  // is_first_srflx real-srflx-duplication logic above) so that seeing a
+  // host candidate doesn't perturb that counter — it only needs to make the
+  // from-scratch fabrication below a no-op. See its use below for why.
+  bool host_already_present = false;
+  // Extracted once up front: once this SanitizeSdp output (with fabricated
+  // candidates embedded as text) is handed to setLocalDescription(),
+  // libwebrtc parses it into real internal cricket::Candidate objects — and
+  // a later read of local_description()->ToString() re-serializes from
+  // those parsed objects, not the original string. That parse/re-serialize
+  // round-trip silently drops extension attributes libwebrtc's Candidate
+  // parser doesn't track (ufrag, raddr, rport), even though it keeps others
+  // (network-cost). NOTE: this is a real native-pool reflection of our
+  // fabricated text (the candidates ARE genuinely present in
+  // local_description() from that point on, not just SDP text) — but it
+  // still isn't visible via getStats(), which reads from WebRTC's gathering
+  // pipeline (StunPort etc.), not from the parsed SessionDescription. Re-add
+  // the dropped attributes below from this SDP's own ufrag/position so
+  // every read looks identically complete, not just the first
+  // (pre-round-trip) one.
+  std::string current_ufrag = ExtractIceUfrag(sdp_str);
+  auto find_value = [](const std::vector<std::string>& p,
+                        const std::string& key,
+                        const std::string& fallback) {
+    auto it = std::find(p.begin(), p.end(), key);
+    return (it != p.end() && (it + 1) != p.end()) ? *(it + 1) : fallback;
+  };
+  // Rebuilds |p|'s attributes after "typ TYPE" (index 8 on) in the exact
+  // canonical order genuine Chrome emits: [raddr R rport P] generation G
+  // ufrag U network-cost C. Naively re-appending only the attributes
+  // current_ufrag's round-trip dropped — this function's first version —
+  // produced "generation 0 network-cost 999 ufrag X" instead of "generation
+  // 0 ufrag X network-cost 999", a visible deviation from genuine Chrome's
+  // fixed attribute order. Pulls existing values from |p| where present so
+  // a field that survived the round-trip keeps its real value.
+  auto rebuild_candidate_attrs = [&find_value](
+      std::vector<std::string>& p, bool has_raddr,
+      const std::string& raddr_default, const std::string& ufrag_value,
+      bool force_raddr = false) {
+    // |force_raddr| bypasses the "keep whatever raddr is already present"
+    // default below: native srflx candidates (the ones already
+    // addr==proxy_ip) always arrive with an explicit "raddr 0.0.0.0" baked
+    // in (set by NoEgressUdpSocket's synthetic STUN responder), so
+    // find_value's normal "only use raddr_default if the field is MISSING"
+    // logic never actually applies raddr_default for them — the existing
+    // 0.0.0.0 always wins, leaving every native srflx in a connection
+    // showing 0.0.0.0 instead of alternating with the proxy IP like genuine
+    // multi-homed Chrome. force_raddr=true makes the caller's computed
+    // value (0.0.0.0 for the very first srflx in the connection, proxy_ip
+    // for every other one) win outright instead.
+    std::string raddr_val =
+        !has_raddr ? std::string()
+                   : force_raddr ? raddr_default
+                                 : find_value(p, "raddr", raddr_default);
+    std::string rport_val = has_raddr ? find_value(p, "rport", "0")
+                                       : std::string();
+    std::string generation_val = find_value(p, "generation", "0");
+    std::string ufrag_val =
+        !ufrag_value.empty() ? ufrag_value : find_value(p, "ufrag", "");
+    std::string netcost_val = find_value(p, "network-cost", "999");
+    std::vector<std::string> rebuilt(p.begin(), p.begin() + 8);
+    if (has_raddr) {
+      rebuilt.push_back("raddr");
+      rebuilt.push_back(raddr_val);
+      rebuilt.push_back("rport");
+      rebuilt.push_back(rport_val);
+    }
+    rebuilt.push_back("generation");
+    rebuilt.push_back(generation_val);
+    if (!ufrag_val.empty()) {
+      rebuilt.push_back("ufrag");
+      rebuilt.push_back(ufrag_val);
+    }
+    rebuilt.push_back("network-cost");
+    rebuilt.push_back(netcost_val);
+    p = rebuilt;
+  };
+  // Pre-split into per-"m=" section text (boundaries at "\nm=") so the host
+  // branch below can check "does THIS host's OWN m= section already have a
+  // real srflx", independent of other sections. A connection's m=audio,
+  // m=video, m=application lines are not always unified under one BUNDLEd
+  // ICE transport — each can gather its own independent host candidates on
+  // its own local port — so a single connection-wide "have we derived a
+  // pair yet" flag wrongly makes only the FIRST section's host group ever
+  // get a derived srflx pair, leaving every other section host-only.
+  // Index 0 is the preamble (session-level lines before the first m=);
+  // index N is the Nth "m=" section's own content.
+  std::vector<bool> section_has_real_srflx;
+  {
+    size_t scan_start = 0;
+    while (true) {
+      size_t next_m = sdp_str.find("\nm=", scan_start);
+      size_t section_end = (next_m == std::string::npos) ? sdp_str.size() : next_m;
+      std::string section_text = sdp_str.substr(scan_start, section_end - scan_start);
+      section_has_real_srflx.push_back(section_text.find(" typ srflx") !=
+                                       std::string::npos);
+      if (next_m == std::string::npos) break;
+      scan_start = next_m + 1;
+    }
+  }
+  // One entry per "m=" section encountered so far in this call (0-indexed,
+  // parallel to |host_insert_positions| below): the srflx pair (if any)
+  // derived for THAT section's own first host line this call, to be
+  // inserted into |result| only after the loop finishes — right after that
+  // section's own LAST host line, not immediately after the one that
+  // seeded it. Genuine Chrome groups all host candidates together before
+  // any srflx (host1, host2, srflx1, srflx2); inserting inline right after
+  // the seeding host line instead produced a visibly wrong
+  // host1/srflx1/srflx2/host2 order.
+  std::vector<std::pair<std::string, std::string>> section_pending_pairs;
+  // One entry per "m=" section encountered so far, holding the position in
+  // |result| right after that section's own last host line (npos if none
+  // seen yet in that section).
+  std::vector<size_t> host_insert_positions;
+  // One entry per "m=" section encountered so far this call: count of REAL
+  // native srflx candidates (address already equals the proxy IP) let
+  // through in THAT section. A connection whose m=audio/m=video/application
+  // each gather their own independent host candidates genuinely produces 2
+  // real srflx PER section when the SOCKS5 UDP tunnel works end-to-end —
+  // capping at 2 once for the whole SDP (the old behavior) spends the
+  // budget on the first section's pair and drops every later section's
+  // genuine srflx outright, which is exactly the "m=video/application
+  // missing srflx" symptom. Parallel to |host_insert_positions|.
+  std::vector<int> section_native_srflx_count;
+  // Parallel to |section_native_srflx_count|: the priority field of the
+  // FIRST native srflx let through for that section, so the second one
+  // (which NoEgressUdpSocket's synthetic STUN responder always gives an
+  // IDENTICAL priority to — a native-pipeline bug, see
+  // trickle_native_srflx_first_priority_'s comment) can be rewritten to
+  // genuine Chrome's fixed +2560 delta instead of staying identical.
+  std::vector<unsigned> section_native_srflx_first_priority;
 
   std::string result;
   size_t start = 0;
@@ -174,6 +706,19 @@ static String SanitizeSdp(const String& sdp, const std::string& proxy_ip_raw) {
     if (!line.empty() && line.back() == '\r') {
       has_cr = true;
       line.pop_back();
+    }
+
+    bool drop_line = false;
+    bool is_host_line = false;
+
+    if (line.rfind("m=", 0) == 0) {
+      // New media section starting — give it its own slot to track where
+      // ITS host group ends, so the deferred derived-pair insertion below
+      // can target every section, not just the first.
+      host_insert_positions.push_back(std::string::npos);
+      section_pending_pairs.push_back({});
+      section_native_srflx_count.push_back(0);
+      section_native_srflx_first_priority.push_back(0);
     }
 
     if (line.rfind("c=IN IP4 ", 0) == 0 || line.rfind("c=IN IP6 ", 0) == 0) {
@@ -191,51 +736,453 @@ static String SanitizeSdp(const String& sdp, const std::string& proxy_ip_raw) {
         pos = space + 1;
       }
 
-      if (parts.size() >= 8) {
-        std::string ip = parts[4];
-        if (ip.find(".local") == std::string::npos && 
-            ip != "0.0.0.0" && ip != "127.0.0.1" && ip != "::") {
-          parts[4] = proxy_ip;
-          if (parts.size() >= 8 && parts[6] == "typ") {
-            parts[7] = "srflx";
-            if (parts.size() >= 12 && parts[8] == "raddr") {
-              parts[9] = is_ipv6 ? "::" : "0.0.0.0";
-              parts[11] = "0";
-            } else if (parts.size() == 8) {
-              parts.push_back("raddr");
-              parts.push_back(is_ipv6 ? "::" : "0.0.0.0");
-              parts.push_back("rport");
-              parts.push_back("0");
-            } else if (parts.size() > 8) {
-              auto it = std::find(parts.begin(), parts.end(), "typ");
-              if (it != parts.end() && (it + 1) != parts.end()) {
-                auto raddr_it = std::find(parts.begin(), parts.end(), "raddr");
-                if (raddr_it != parts.end() && (raddr_it + 1) != parts.end()) {
-                  *(raddr_it + 1) = is_ipv6 ? "::" : "0.0.0.0";
-                } else {
-                  parts.insert(it + 2, { "raddr", is_ipv6 ? "::" : "0.0.0.0", "rport", "0" });
+      // Format: candidate:foundation comp transport priority IP port typ type ...
+      if (parts.size() >= 8 && parts[6] == "typ") {
+        std::string typ = parts[7];
+
+        bool line_fully_built = false;
+        is_host_line = (typ == "host");
+
+        if (typ == "srflx") {
+          VLOG(1) << "SanitizeSdp: srflx line seen, call_site="
+                  << (extra_candidates ? "trickle(OnIceCandidate)"
+                                       : "full-sdp(CreateWebKitSessionDescription)")
+                  << " addr=" << parts[4] << " proxy_ip=" << proxy_ip
+                  << " addr_eq_proxy=" << (parts[4] == proxy_ip)
+                  << " *srflx_count=" << *srflx_count
+                  << " shared_srflx_count_ptr=" << shared_srflx_count
+                  << " line='" << line << "'";
+          // Only rewrite if the address isn't already the proxy IP. When the
+          // SOCKS5 tunnel (forward mode) ran correctly, this candidate's IP
+          // already IS proxy_ip — mutating foundation/raddr/rport in that case
+          // would itself be a deviation from genuine unmodified Chrome output,
+          // not a "safe no-op".
+          if (parts[4] != proxy_ip && is_replace_mode) {
+            // Replace mode: this is a genuinely real srflx (real STUN, real
+            // public IP, since replace mode never tunnels) that just needs
+            // its address text swapped to the configured proxy IP — a
+            // simple 1:1 in-place rewrite, NOT the forward-mode pairing
+            // below (see IsReplaceMode's comment for why reusing that here
+            // fabricated an extra candidate genuine Chrome never produced
+            // for this connection).
+            //
+            // raddr is forced to the wildcard address, NOT preserved: a
+            // side-by-side capture against genuine unmodified Chrome on the
+            // same connection (same mDNS-hidden mode, evidenced by the
+            // .local-masked host candidates alongside it) showed its own
+            // real srflx candidates ALWAYS carry raddr=0.0.0.0 (or "::" for
+            // IPv6) — never the real local LAN address. Preserving the
+            // genuine raddr (this branch's previous behavior) leaked the
+            // real private IP (e.g. 192.168.1.48) in plain text.
+            //
+            // The wildcard's own family must match THIS candidate's
+            // original address family, not |is_ipv6| (which reflects the
+            // proxy_ip's family): a machine with both an IPv4 and an IPv6
+            // interface produces one srflx of each family, and proxy_ip
+            // here is IPv4-only — using |is_ipv6| would wrongly force "::"
+            // (or "0.0.0.0") based on the proxy instead of this specific
+            // candidate.
+            bool candidate_was_ipv6 = parts[4].find(':') != std::string::npos;
+            parts[4] = proxy_ip;
+            rebuild_candidate_attrs(parts, /*has_raddr=*/true,
+                                     candidate_was_ipv6 ? "::" : "0.0.0.0",
+                                     current_ufrag, /*force_raddr=*/true);
+          } else if (parts[4] != proxy_ip) {
+            // Determine if this is the first srflx candidate
+            bool is_first_srflx = (*srflx_count == 0);
+            (*srflx_count)++;
+
+            if (is_first_srflx) {
+              std::string cand1, cand2;
+              BuildFakeSrflxPair(parts, proxy_ip, is_ipv6,
+                                 /*priority_type_delta=*/0, &cand1, &cand2);
+              if (extra_candidates) {
+                line = cand1;
+                extra_candidates->push_back(cand2);
+              } else {
+                line = cand1 + (has_cr ? "\r\n" : "\n") + cand2;
+              }
+              line_fully_built = true;
+            } else {
+              // Not the first one. To ensure a stable fingerprint of exactly 2 srflx candidates
+              // (one 0.0.0.0 and one ProxyIP) regardless of how many network interfaces the machine has,
+              // we DROP all subsequent native srflx candidates.
+              drop_line = true;
+            }
+          } else {
+            // parts[4] == proxy_ip already: either a genuinely successful
+            // SOCKS5 tunnel, or (forward mode, non-SOCKS5 proxy) a candidate
+            // MaybeFabricateForwardModeCandidates previously injected into
+            // the native PeerConnection (see its comment) — which makes it
+            // show up here as a "real" candidate on every subsequent read of
+            // localDescription.sdp. Re-add any of ufrag/raddr/rport the
+            // native round-trip (see current_ufrag's comment) may have
+            // dropped — raddr defaults to 0.0.0.0 for the first occurrence
+            // and proxy_ip for the second, matching BuildFakeSrflxPair's own
+            // pairing scheme.
+            //
+            // Capped at exactly 2 PER TRANSPORT (m= section for full-sdp,
+            // sdp_mline_index for trickle), not once for the whole
+            // connection: a connection whose m=audio/m=video/application
+            // each gather independent host candidates (not unified under
+            // one BUNDLEd ICE transport) genuinely produces its OWN real
+            // srflx pair per section when the SOCKS5 UDP tunnel works
+            // end-to-end. A single connection-wide cap spends the budget on
+            // the first section's pair and DROPS every later section's
+            // genuine srflx outright (the "m=video/application missing
+            // srflx" symptom), while still needing a cap at all so a
+            // multi-homed machine's extra real interfaces within the SAME
+            // section don't grow unbounded (the "dư srflx" / excess srflx
+            // symptom).
+            int* native_count = nullptr;
+            unsigned* first_priority = nullptr;
+            if (extra_candidates) {
+              if (trickle_native_srflx_count) {
+                auto add_result =
+                    trickle_native_srflx_count->insert(sdp_mline_index + 1, 0);
+                native_count = &add_result.stored_value->value;
+              }
+              if (trickle_native_srflx_first_priority) {
+                auto prio_result = trickle_native_srflx_first_priority->insert(
+                    sdp_mline_index + 1, 0);
+                first_priority = &prio_result.stored_value->value;
+              }
+            } else {
+              size_t section_idx = host_insert_positions.empty()
+                                        ? 0
+                                        : host_insert_positions.size() - 1;
+              if (section_idx < section_native_srflx_count.size()) {
+                native_count = &section_native_srflx_count[section_idx];
+              }
+              if (section_idx < section_native_srflx_first_priority.size()) {
+                first_priority = &section_native_srflx_first_priority[section_idx];
+              }
+            }
+            if (native_count) {
+              VLOG(1) << "SanitizeSdp: native srflx per-transport cap, "
+                         "call_site="
+                      << (extra_candidates ? "trickle" : "full-sdp")
+                      << " sdp_mline_index=" << sdp_mline_index
+                      << " section_idx="
+                      << (extra_candidates
+                              ? -1
+                              : static_cast<int>(
+                                    host_insert_positions.empty()
+                                        ? 0
+                                        : host_insert_positions.size() - 1))
+                      << " native_count_before=" << *native_count
+                      << " will_drop=" << (*native_count >= 2);
+              if (*native_count >= 2) {
+                drop_line = true;
+              } else {
+                // raddr alternation is intentionally GLOBAL
+                // (*srflx_count), not per-transport (*native_count): genuine
+                // multi-homed Chrome shows raddr=0.0.0.0 for only the very
+                // FIRST srflx in the whole connection and the real local
+                // address for every other one. Using the per-transport
+                // counter here made EVERY transport's own first srflx show
+                // 0.0.0.0 (since each transport's native_count independently
+                // starts at 0), so a multi-transport connection showed
+                // raddr=0.0.0.0 on every single srflx instead of just one.
+                bool is_first_seen = (*srflx_count == 0);
+                rebuild_candidate_attrs(
+                    parts, /*has_raddr=*/true,
+                    is_first_seen ? (is_ipv6 ? "::" : "0.0.0.0") : proxy_ip,
+                    current_ufrag, /*force_raddr=*/true);
+                // Priority alternation, unlike raddr, IS per-transport
+                // (*native_count): the two real srflx candidates being
+                // disambiguated here both belong to the SAME transport
+                // (e.g. both gathered for m=audio), so they should follow
+                // the same fixed +2560 pairing genuine Chrome uses between
+                // a transport's own two interfaces — NOT the connection-
+                // wide *srflx_count, which would compare across unrelated
+                // transports. NoEgressUdpSocket's synthetic STUN responder
+                // currently gives every native srflx on a transport the
+                // SAME priority (a native-pipeline bug — see
+                // trickle_native_srflx_first_priority_'s declaration),
+                // so this rewrites the second one explicitly.
+                if (first_priority) {
+                  unsigned cur_prio = 0;
+                  if (*native_count == 0) {
+                    if (base::StringToUint(parts[3], &cur_prio)) {
+                      *first_priority = cur_prio;
+                    }
+                  } else if (*first_priority != 0) {
+                    parts[3] =
+                        base::NumberToString(*first_priority + 2560u);
+                  }
                 }
-                auto rport_it = std::find(parts.begin(), parts.end(), "rport");
-                if (rport_it != parts.end() && (rport_it + 1) != parts.end()) {
-                  *(rport_it + 1) = "0";
-                }
+              }
+              (*native_count)++;
+            } else {
+              // No per-transport scope available (shouldn't normally
+              // happen) — fall back to the old connection-wide cap rather
+              // than passing the candidate through unbounded.
+              if (*srflx_count >= 2) {
+                drop_line = true;
+              } else {
+                bool is_first_seen = (*srflx_count == 0);
+                rebuild_candidate_attrs(
+                    parts, /*has_raddr=*/true,
+                    is_first_seen ? (is_ipv6 ? "::" : "0.0.0.0") : proxy_ip,
+                    current_ufrag, /*force_raddr=*/true);
+              }
+            }
+            (*srflx_count)++;
+          }
+        } else if (typ == "host") {
+          // Safety net for when Chromium's native mDNS hiding didn't run
+          // (see IsMdnsHostname's comment) — without this, parts[4] (and
+          // thus the final line, rebuilt from parts below) would carry the
+          // real local IP/IPv6 literal straight through untouched, since
+          // nothing else in this branch ever inspects or rewrites it.
+          if (!IsMdnsHostname(parts[4])) {
+            parts[4] = MaskRealHostAddress(parts[4]);
+          }
+          VLOG(1) << "SanitizeSdp: host line seen, call_site="
+                  << (extra_candidates ? "trickle(OnIceCandidate)"
+                                       : "full-sdp(CreateWebKitSessionDescription)")
+                  << " sdp_mline_index=" << sdp_mline_index
+                  << " trickle_set_ptr=" << trickle_mline_srflx_done
+                  << " trickle_set_size_before="
+                  << (trickle_mline_srflx_done
+                          ? static_cast<int>(trickle_mline_srflx_done->size())
+                          : -1)
+                  << " line='" << line << "'";
+          // Decide whether THIS host's own transport (m= section for
+          // full-sdp, sdp_mline_index for trickle) still needs a derived
+          // srflx pair — gated per-transport rather than once globally, so
+          // a connection whose m=audio/m=video/m=application each gather
+          // independent host candidates (not unified under one BUNDLEd ICE
+          // transport) gets a pair for EVERY one of them, not just the
+          // first ever seen. This covers the case a static proxy-type check
+          // can't: a *SOCKS5* proxy whose UDP ASSOCIATE failed at runtime
+          // (REP=0x7) and fell back to NoEgressUdpSocket — it still binds a
+          // genuine host socket, but no srflx will ever be gathered (sends
+          // are blocked), and fabricate_srflx_from_host is statically false
+          // for it (the proxy scheme itself is valid SOCKS5).
+          bool derive_for_this_host = false;
+          size_t section_idx = 0;
+          // Only fabricate from host text when there is NO real UDP socket
+          // at all (HTTP/SOCKS4 forward mode, force_no_udp_egress) — i.e.
+          // |fabricate_srflx_from_host| is true. For SOCKS5, a real UDP
+          // socket always exists; when its ASSOCIATE fails at runtime, it
+          // falls back to NoEgressUdpSocket, whose own SendTo() already
+          // replies with a synthetic STUN Binding Response (see that
+          // class), making libwebrtc itself genuinely gather a native
+          // srflx candidate (addr already == proxy_ip) through the normal
+          // pipeline — no text-level fabrication needed or wanted here.
+          // Deriving from host text ANYWAY (the old, unconditional
+          // behavior) raced against that native srflx: the host-derived
+          // fake pair got pushed to the page immediately on host arrival,
+          // then the genuinely-native one arrived moments later and (after
+          // the per-transport cap fix above) was no longer suppressed
+          // either — yielding 4 srflx per transport (2 fake + 2 real)
+          // instead of 2. Confirmed via VLOG: ufrag r0cv's mline 0 shows
+          // "derived srflx from host" (foundations 2082703547/1890134511)
+          // followed by a separate "srflx line seen ... addr_eq_proxy=1"
+          // (foundations 3098775684/3399576695) for the SAME host port.
+          if (fabricate_srflx_from_host) {
+            if (extra_candidates) {
+              // Trickle: one specific m-line's host just arrived. +1
+              // because WTF::HashSet<int>'s default HashTraits uses 0 as
+              // the internal "empty slot" sentinel — storing the literal
+              // value 0 (the common case: most connections have exactly
+              // one, audio-only, m-line) is unreliable, making insert(0)
+              // spuriously report "new entry" every time instead of only
+              // the first. Confirmed via VLOG: trickle_set_size_before=1
+              // yet insert(0) still returned is_new_entry=true on the
+              // connection's SECOND host.
+              if (trickle_mline_srflx_done &&
+                  trickle_mline_srflx_done->insert(sdp_mline_index + 1)
+                      .is_new_entry) {
+                derive_for_this_host = true;
+              }
+            } else if (!host_insert_positions.empty()) {
+              section_idx = host_insert_positions.size() - 1;
+              bool this_section_has_real_srflx =
+                  host_insert_positions.size() <
+                      section_has_real_srflx.size() &&
+                  section_has_real_srflx[host_insert_positions.size()];
+              if (!this_section_has_real_srflx &&
+                  section_pending_pairs[section_idx].first.empty()) {
+                derive_for_this_host = true;
               }
             }
           }
+
+          if (derive_for_this_host) {
+            // Derive a believable srflx pair from this real host line so
+            // the SDP isn't host-only, the same way BuildFakeSrflxPair
+            // already does for the fully-synthetic forward-mode case below.
+            rebuild_candidate_attrs(parts, /*has_raddr=*/false, "",
+                                     current_ufrag);
+            // cand1/cand2 already carry whatever prefix parts[0] had (e.g.
+            // "a=" if the original line had it), inherited via
+            // BuildFakeSrflxPair's seed_parts copy — do not prepend "a="
+            // again when using them (that's what produced the
+            // "a=a=candidate:" bug).
+            std::string cand1, cand2;
+            BuildFakeSrflxPair(parts, proxy_ip, is_ipv6,
+                               /*priority_type_delta=*/26, &cand1, &cand2);
+            if (extra_candidates) {
+              extra_candidates->push_back(cand1);
+              extra_candidates->push_back(cand2);
+            } else {
+              // Don't insert inline here — stash for insertion after this
+              // SECTION's LAST host line once the loop finishes (see
+              // host_insert_positions' declaration for why).
+              section_pending_pairs[section_idx] = {cand1, cand2};
+            }
+            // Reconstruct this host line itself, normalized, in place.
+            line = parts[0];
+            for (size_t i = 1; i < parts.size(); ++i) {
+              line += " " + parts[i];
+            }
+            line_fully_built = true;
+            VLOG(1) << "SanitizeSdp: derived srflx from host, cand1='"
+                    << cand1 << "' cand2='" << cand2 << "'";
+          } else {
+            // Already-complete candidate set (srflx exists elsewhere for
+            // this transport, or this isn't the first host line of it) —
+            // re-add ufrag/network-cost if the native round-trip (see
+            // current_ufrag's comment) dropped them from this host line.
+            rebuild_candidate_attrs(parts, /*has_raddr=*/false, "",
+                                     current_ufrag);
+          }
+          // Still meaningful for the fully-synthetic fallback check below
+          // (fabricate_srflx_from_host): that path should only fire when
+          // there is truly no host candidate anywhere, regardless of which
+          // per-transport derive decision was made above.
+          host_already_present = true;
+        } else if (typ == "relay") {
+          // Only rewrite if raddr doesn't already point at the proxy IP.
+          // raddr here reflects the srflx address used to reach the TURN
+          // server; if it's already proxy_ip the tunnel worked correctly and
+          // this is a genuine no-op. If it differs (native-fallback path
+          // leaked the real IP), spoof it the same way srflx is spoofed above.
+          auto raddr_it = std::find(parts.begin(), parts.end(), "raddr");
+          bool raddr_already_correct = raddr_it != parts.end() &&
+                                        (raddr_it + 1) != parts.end() &&
+                                        *(raddr_it + 1) == proxy_ip;
+          if (!raddr_already_correct) {
+            // We are rewriting this candidate in place (not duplicating it
+            // like srflx above), so its foundation is untouched: a relay
+            // candidate's foundation only depends on type/base
+            // address/protocol/relay_protocol, none of which we change here.
+            // (An earlier revision appended a digit to the foundation
+            // string, which is the same invalid-range bug already fixed for
+            // srflx above — a real CRC32-derived foundation never exceeds 10
+            // decimal digits, so blindly appending one can produce a value
+            // no genuine Chrome foundation could ever take.)
+
+            // DO NOT touch parts[4] because it is the TURN server's IP.
+            // BUT the raddr of a relay candidate leaks the STUN/srflx IP (which is the real IP).
+            // Since we spoofed the srflx IP to be proxy_ip, we MUST spoof the relay raddr to be proxy_ip!
+            if (raddr_it != parts.end() && (raddr_it + 1) != parts.end()) {
+              *(raddr_it + 1) = proxy_ip;
+            } else {
+              parts.push_back("raddr");
+              parts.push_back(proxy_ip);
+            }
+            // We leave rport as is, because it points to the srflx port, which perfectly mimics Chrome!
+          }
         }
-        line = parts[0];
-        for (size_t i = 1; i < parts.size(); ++i) {
-          line += " " + parts[i];
+        
+        // Reconstruct the modified line only if we didn't override `line`
+        // completely (srflx duplication / host fabrication, both set
+        // line_fully_built) and we are not dropping it.
+        if (!drop_line && !line_fully_built) {
+          line = parts[0];
+          for (size_t i = 1; i < parts.size(); ++i) {
+            line += " " + parts[i];
+          }
         }
       }
     }
 
-    result += line;
-    if (has_cr) result += "\r";
-    if (end != std::string::npos) result += "\n";
-    
+    if (!drop_line) {
+      result += line;
+      if (has_cr) result += "\r";
+      if (end != std::string::npos) result += "\n";
+      if (is_host_line && !host_insert_positions.empty()) {
+        host_insert_positions.back() = result.size();
+      }
+    }
+
     if (end == std::string::npos) break;
     start = end + 1;
+  }
+
+  // Insert each section's own derived srflx pair (if any — see the host
+  // branch above) right after THAT section's LAST host line, matching
+  // genuine Chrome's host1/host2/srflx1/srflx2 grouping instead of
+  // interleaving. Each m= section gets its own independently-seeded pair
+  // (not a single shared one copied everywhere), since m=audio/m=video/
+  // m=application can each gather their own independent host candidates.
+  // Trickle already pushed its (single, per-mline) pair directly into
+  // |extra_candidates| inside the loop above, so there's nothing left to do
+  // here for that call site.
+  if (!extra_candidates) {
+    // Insert from the last position backward so earlier offsets in
+    // |host_insert_positions| stay valid as |result| grows.
+    std::vector<size_t> indices(host_insert_positions.size());
+    for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+    std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+      return host_insert_positions[a] < host_insert_positions[b];
+    });
+    for (auto it = indices.rbegin(); it != indices.rend(); ++it) {
+      size_t i = *it;
+      if (host_insert_positions[i] == std::string::npos ||
+          section_pending_pairs[i].first.empty()) {
+        continue;
+      }
+      std::string insertion = "a=" + section_pending_pairs[i].first + "\r\n" +
+                               "a=" + section_pending_pairs[i].second +
+                               "\r\n";
+      result.insert(host_insert_positions[i], insertion);
+    }
+  }
+
+  if (fabricate_srflx_from_host && *srflx_count == 0 && !host_already_present) {
+    // No real candidate (host or srflx) was found anywhere in |sdp| — see
+    // FabricateHostAndSrflxTriplet's comment for why. Synthesize one so the
+    // SDP doesn't look like a connection with zero local candidates.
+    std::string ufrag = ExtractIceUfrag(sdp_str);
+    VLOG(1) << "SanitizeSdp: fabrication trigger, call_site="
+            << (extra_candidates ? "trickle(OnIceCandidate)"
+                                  : "full-sdp(CreateWebKitSessionDescription)")
+            << " ufrag='" << ufrag << "' sdp_str.length()=" << sdp_str.length()
+            << " shared_srflx_count_ptr="
+            << (shared_srflx_count ? "non-null(persistent)" : "null(local-fresh)");
+    if (!ufrag.empty()) {
+      std::string host_line, host_line2, srflx1, srflx2;
+      FabricateHostAndSrflxTriplet(ufrag, proxy_ip, is_ipv6, &host_line,
+                                    &host_line2, &srflx1, &srflx2);
+      VLOG(1) << "SanitizeSdp: fabricated host_line='" << host_line << "'";
+      (*srflx_count) = 1;
+      if (extra_candidates) {
+        extra_candidates->push_back(host_line);
+        extra_candidates->push_back(host_line2);
+        extra_candidates->push_back(srflx1);
+        extra_candidates->push_back(srflx2);
+      } else {
+        // Insert right after the first m= section's a=ice-ufrag line, which
+        // is where real candidate lines for that section would start
+        // appearing.
+        size_t insert_pos = result.find("a=ice-ufrag:");
+        if (insert_pos != std::string::npos) {
+          insert_pos = result.find('\n', insert_pos);
+        }
+        if (insert_pos != std::string::npos) {
+          insert_pos += 1;
+          std::string insertion = "a=" + host_line + "\r\n" + "a=" +
+                                   host_line2 + "\r\n" + "a=" + srflx1 +
+                                   "\r\n" + "a=" + srflx2 + "\r\n";
+          result.insert(insert_pos, insertion);
+        }
+      }
+    }
   }
 
   return String::FromUTF8(result);
@@ -264,8 +1211,24 @@ RTCSessionDescriptionPlatform* CreateWebKitSessionDescription(
   String sdp_str = String::FromUTF8(sdp);
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   std::string proxy_ip = GetWebRtcSdpProxyIp(command_line);
+  int real_candidate_count = 0;
+  for (size_t pos = sdp.find("a=candidate:"); pos != std::string::npos;
+       pos = sdp.find("a=candidate:", pos + 1)) {
+    ++real_candidate_count;
+  }
+  VLOG(1) << "CreateWebKitSessionDescription(native_desc): type="
+          << native_desc->type() << " raw_sdp.length()=" << sdp.length()
+          << " real_candidate_lines_in_native_sdp=" << real_candidate_count
+          << " proxy_ip='" << proxy_ip << "'";
   if (!proxy_ip.empty()) {
-    sdp_str = SanitizeSdp(sdp_str, proxy_ip);
+    sdp_str = SanitizeSdp(sdp_str, proxy_ip, /*shared_srflx_count=*/nullptr,
+                          /*extra_candidates=*/nullptr,
+                          IsForwardModeUsingNonSocks5Proxy(command_line),
+                          /*trickle_mline_srflx_done=*/nullptr,
+                          /*sdp_mline_index=*/0,
+                          /*trickle_native_srflx_count=*/nullptr,
+                          /*trickle_native_srflx_first_priority=*/nullptr,
+                          IsReplaceMode(command_line));
   }
 
   return CreateWebKitSessionDescription(sdp_str.Utf8(), native_desc->type());
@@ -1104,6 +2067,11 @@ RTCPeerConnectionHandler::CreateOffer(RTCSessionDescriptionRequest* request,
   if (peer_connection_tracker_)
     peer_connection_tracker_->TrackCreateOffer(this, options);
 
+  srflx_candidate_count_ = 0;
+  host_derived_srflx_mlines_.clear();
+  trickle_native_srflx_count_.clear();
+  trickle_native_srflx_first_priority_.clear();
+
   webrtc::PeerConnectionInterface::RTCOfferAnswerOptions webrtc_options;
   if (options) {
     webrtc_options.offer_to_receive_audio = options->OfferToReceiveAudio();
@@ -1159,6 +2127,12 @@ void RTCPeerConnectionHandler::CreateAnswer(
           task_runner_, request, weak_factory_.GetWeakPtr(),
           peer_connection_tracker_,
           PeerConnectionTracker::kActionCreateAnswer));
+          
+  srflx_candidate_count_ = 0;
+  host_derived_srflx_mlines_.clear();
+  trickle_native_srflx_count_.clear();
+  trickle_native_srflx_first_priority_.clear();
+
   // TODO(tommi): Do this asynchronously via e.g. PostTaskAndReply.
   webrtc::PeerConnectionInterface::RTCOfferAnswerOptions webrtc_options;
   if (options) {
@@ -2067,6 +3041,15 @@ void RTCPeerConnectionHandler::OnIceGatheringChange(
     webrtc::PeerConnectionInterface::IceGatheringState new_state) {
   DCHECK(task_runner_->RunsTasksInCurrentSequence());
   TRACE_EVENT0("webrtc", "RTCPeerConnectionHandler::OnIceGatheringChange");
+  if (new_state == webrtc::PeerConnectionInterface::kIceGatheringComplete) {
+    // Must run BEFORE DidChangeIceGatheringState below: the renderer-level
+    // RTCPeerConnection automatically fires the spec-mandated final
+    // null-candidate "end of candidates" event in response to that state
+    // change (see RTCPeerConnection::ChangeIceGatheringState), so any
+    // fabricated candidates need to be delivered first to preserve the same
+    // event ordering genuine Chrome would produce.
+    MaybeFabricateForwardModeCandidates();
+  }
   if (peer_connection_tracker_)
     peer_connection_tracker_->TrackIceGatheringStateChange(this, new_state);
   if (!is_closed_)
@@ -2199,14 +3182,21 @@ void RTCPeerConnectionHandler::OnIceCandidate(const String& sdp,
   TRACE_EVENT0("webrtc", "RTCPeerConnectionHandler::OnIceCandidateImpl");
 
   // WebRTC "Base on IP Proxy": Replace real IP with proxy IP in ICE candidates.
-  // When --webrtc-proxy-ip=<IP> is set, or when --webrtc-mode=forward_udp with
+  // When --webrtc-proxy-ip=<IP> is set, or when --webrtc-mode=forward with
   // --proxy-server=<proxy> is set, the candidate SDP is sanitized before
   // exposing to JavaScript.
   String modified_sdp = sdp;
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   std::string proxy_ip = GetWebRtcSdpProxyIp(command_line);
+  std::vector<std::string> extra_candidates;
   if (!proxy_ip.empty()) {
-    modified_sdp = SanitizeSdp(sdp, proxy_ip);
+    modified_sdp = SanitizeSdp(sdp, proxy_ip, &srflx_candidate_count_,
+                               &extra_candidates,
+                               IsForwardModeUsingNonSocks5Proxy(command_line),
+                               &host_derived_srflx_mlines_, sdp_mline_index,
+                               &trickle_native_srflx_count_,
+                               &trickle_native_srflx_first_priority_,
+                               IsReplaceMode(command_line));
   }
 
   // This line can cause garbage collection.
@@ -2219,6 +3209,86 @@ void RTCPeerConnectionHandler::OnIceCandidate(const String& sdp,
 
   if (!is_closed_ && client_on_stack) {
     client_on_stack->DidGenerateICECandidate(platform_candidate);
+  }
+
+  for (const auto& extra : extra_candidates) {
+    auto* extra_platform_candidate = MakeGarbageCollected<RTCIceCandidatePlatform>(
+        String::FromUTF8(extra), sdp_mid, sdp_mline_index, usernameFragment, url);
+    if (peer_connection_tracker_) {
+      peer_connection_tracker_->TrackAddIceCandidate(
+          this, extra_platform_candidate, PeerConnectionTracker::kSourceLocal, true);
+    }
+    if (!is_closed_ && client_on_stack) {
+      client_on_stack->DidGenerateICECandidate(extra_platform_candidate);
+    }
+  }
+}
+
+void RTCPeerConnectionHandler::MaybeFabricateForwardModeCandidates() {
+  base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+  VLOG(1) << "MaybeFabricateForwardModeCandidates: entry, srflx_candidate_count_="
+          << srflx_candidate_count_
+          << " is_non_socks5_forward="
+          << IsForwardModeUsingNonSocks5Proxy(command_line);
+  if (!IsForwardModeUsingNonSocks5Proxy(command_line)) {
+    return;
+  }
+  if (srflx_candidate_count_ != 0) {
+    // Either already fabricated for this gathering cycle, or (shouldn't
+    // happen for this mode, since force_no_udp_egress guarantees zero real
+    // local ports — see peer_connection_dependency_factory.cc) a real
+    // candidate already fired via OnIceCandidate.
+    VLOG(1) << "MaybeFabricateForwardModeCandidates: skipping, already "
+               "fabricated/real candidate exists this cycle.";
+    return;
+  }
+  std::string proxy_ip_raw = GetWebRtcSdpProxyIp(command_line);
+  if (proxy_ip_raw.empty()) {
+    return;
+  }
+
+  auto* client_on_stack = client_.Get();
+  if (!client_on_stack || is_closed_) {
+    return;
+  }
+
+  std::string ufrag;
+  if (native_peer_connection_) {
+    const webrtc::SessionDescriptionInterface* local_desc =
+        native_peer_connection_->local_description();
+    std::string local_sdp;
+    if (local_desc && local_desc->ToString(&local_sdp)) {
+      ufrag = ExtractIceUfrag(local_sdp);
+    }
+  }
+  if (ufrag.empty()) {
+    return;
+  }
+
+  std::string proxy_ip = NormalizeProxyIp(proxy_ip_raw);
+  bool is_ipv6 = proxy_ip.find(':') != std::string::npos;
+  std::string host_line, host_line2, srflx1, srflx2;
+  FabricateHostAndSrflxTriplet(ufrag, proxy_ip, is_ipv6, &host_line,
+                                &host_line2, &srflx1, &srflx2);
+  VLOG(1) << "MaybeFabricateForwardModeCandidates: emitting trickle events, "
+             "ufrag='"
+          << ufrag << "' host_line='" << host_line << "'";
+  srflx_candidate_count_ = 1;  // Guard against double-fabrication.
+
+  String sdp_mid = "0";
+  String username_fragment = String::FromUTF8(ufrag);
+  for (const std::string& cand : {host_line, host_line2, srflx1, srflx2}) {
+    auto* platform_candidate = MakeGarbageCollected<RTCIceCandidatePlatform>(
+        String::FromUTF8(cand), sdp_mid, /*sdp_mline_index=*/0,
+        username_fragment, String());
+    if (peer_connection_tracker_) {
+      peer_connection_tracker_->TrackAddIceCandidate(
+          this, platform_candidate, PeerConnectionTracker::kSourceLocal,
+          true);
+    }
+    if (!is_closed_ && client_on_stack) {
+      client_on_stack->DidGenerateICECandidate(platform_candidate);
+    }
   }
 }
 

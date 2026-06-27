@@ -124,7 +124,7 @@ using PassKey = base::PassKey<PeerConnectionDependencyFactory>;
 constexpr char kWebRtcModeSwitch[] = "webrtc-mode";
 constexpr char kWebRtcProxyIpSwitch[] = "webrtc-proxy-ip";
 constexpr char kWebRtcModeDisabled[] = "disabled";
-constexpr char kWebRtcModeForwardUdp[] = "forward_udp";
+constexpr char kWebRtcModeForwardUdp[] = "forward";
 
 enum class WebRtcMode {
   kDefault,
@@ -1107,24 +1107,105 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
   const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   const WebRtcMode web_rtc_mode =
       command_line ? GetWebRtcMode(*command_line) : WebRtcMode::kDefault;
-  const bool has_replace_proxy_ip =
-      command_line && command_line->HasSwitch(kWebRtcProxyIpSwitch);
+  // Captured before |effective_mode| is potentially downgraded below (e.g.
+  // HTTP/SOCKS4/hostname proxies can't do a real SOCKS5 UDP tunnel, so
+  // forward mode falls back to SDP-rewrite/"replace" behavior). Relay/TURN
+  // candidate gathering should stay disabled for forward mode's "no relay,
+  // host+srflx only" SDP shape regardless of which underlying mechanism
+  // (real tunnel vs. SDP rewrite) ends up producing the srflx IP.
+  const bool requested_forward_mode = (web_rtc_mode == WebRtcMode::kForwardUdp);
+  // has_replace_proxy_ip: True when SDP IP replacement (replace mode) is active.
+  // This is triggered by EITHER:
+  //   1. Explicit --webrtc-proxy-ip=<IP> flag, OR
+  //   2. --webrtc-mode=replace combined with --proxy-server=<scheme://IP:port>
+  bool has_replace_proxy_ip =
+      command_line && (
+        command_line->HasSwitch(kWebRtcProxyIpSwitch) ||
+        (command_line->GetSwitchValueASCII(kWebRtcModeSwitch) == "replace" &&
+         command_line->HasSwitch("proxy-server"))
+      );
+
+  // Set when forward mode falls back to a non-SOCKS5 proxy that cannot
+  // tunnel UDP (see below). This eliminates EVERY real local Port (UDP and
+  // TCP) so libwebrtc never has a real socket to send an ICE connectivity
+  // check from in the first place — see the long comment below for why a
+  // real host UDP socket (even with STUN/relay gathering disabled) is still
+  // a leak: PORTALLOCATOR_DISABLE_STUN only stops srflx *gathering*, it does
+  // NOT stop the later connectivity-check ping/pong phase
+  // (P2PTransportChannel/Connection::Ping in third_party/webrtc/p2p), which
+  // runs over whatever real local socket exists as soon as a remote
+  // candidate is received — completely bypassing any SDP-text rewriting.
+  // The resulting SDP will have zero real local candidates; the renderer
+  // side (SanitizeSdp) fully fabricates a plausible host+srflx pair as pure
+  // text, with no backing socket, so ICE simply cannot run a real
+  // connectivity check for this connection (real P2P will not connect —
+  // accepted trade-off, this profile is not used for real WebRTC calls).
+  bool force_no_udp_egress = false;
 
   WebRtcMode effective_mode = web_rtc_mode;
   if (effective_mode == WebRtcMode::kForwardUdp) {
     bool is_socks5 = false;
     if (command_line && command_line->HasSwitch("proxy-server")) {
       std::string proxy_str = command_line->GetSwitchValueASCII("proxy-server");
-      // Check if proxy starts with socks5://
+      // Check if proxy starts with socks5:// (case-insensitive)
       if (proxy_str.length() >= 9 &&
           std::equal(proxy_str.begin(), proxy_str.begin() + 9, "socks5://",
                      [](char a, char b) { return tolower(a) == b; })) {
-        is_socks5 = true;
+        std::string host_port_str = proxy_str.substr(9);
+        auto at_pos = host_port_str.rfind('@');
+        if (at_pos != std::string::npos) {
+          host_port_str = host_port_str.substr(at_pos + 1);
+        }
+        while (!host_port_str.empty() && host_port_str.back() == '/') {
+          host_port_str.pop_back();
+        }
+        auto colon_pos = host_port_str.rfind(':');
+        std::string host_only = (colon_pos != std::string::npos) ? host_port_str.substr(0, colon_pos) : host_port_str;
+        
+        // Remove IPv6 brackets if present
+        if (!host_only.empty() && host_only.front() == '[' && host_only.back() == ']') {
+          host_only = host_only.substr(1, host_only.length() - 2);
+        }
+
+        // Basic check for IP literal without pulling in net/base/ip_address.h
+        // If it contains letters other than A-F/a-f, it's a hostname.
+        bool is_ip_literal = true;
+        for (char c : host_only) {
+          if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '.' || c == ':')) {
+            is_ip_literal = false;
+            break;
+          }
+        }
+        if (is_ip_literal) {
+          is_socks5 = true;
+        }
       }
     }
     if (!is_socks5) {
-      LOG(ERROR) << "WebRTC forward_udp requires a socks5:// proxy. Falling back to disabled mode (TCP only).";
-      effective_mode = WebRtcMode::kDisabled;
+      // HTTP/SOCKS4/hostname proxies cannot relay arbitrary UDP (HTTP CONNECT
+      // is TCP-only), so any "fallback" native UDP socket's STUN/DTLS/SRTP
+      // packets physically leave via the real network interface. SDP-text
+      // rewriting (SanitizeSdp) only hides this from scripts that passively
+      // read candidate text — it does nothing against a leak-test service
+      // that runs its own STUN/TURN server and inspects the real source IP
+      // of packets that actually arrive there. Only never sending real UDP
+      // in the first place avoids that.
+      //
+      // NOTE: we deliberately do NOT switch effective_mode to kDisabled here
+      // — kDisabled also forces enable_multiple_routes=false further below,
+      // which swaps in EmptyNetworkManager and yields ZERO candidates of any
+      // kind (no host candidates either), which is worse than the original
+      // "no srflx" problem this feature exists to solve. Instead we set a
+      // dedicated flag that only suppresses non-proxied UDP/STUN/relay while
+      // leaving host/mDNS candidate gathering untouched — the resulting
+      // host-only SDP is what genuine Chrome would also produce on a network
+      // whose only egress is an HTTP proxy (no real UDP route to any STUN
+      // server exists there either).
+      LOG(WARNING) << "WebRTC forward mode requires a socks5:// proxy with a "
+                      "literal IP. HTTP/SOCKS4/hostname proxies can't tunnel "
+                      "UDP, so disabling non-proxied UDP/STUN/relay (host-only "
+                      "SDP) instead of risking a network-layer leak.";
+      force_no_udp_egress = true;
     }
   }
 
@@ -1177,32 +1258,39 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
     }
   }
 
-  if (effective_mode == WebRtcMode::kForwardUdp) {
-    // When using forward_udp (proxy mode), we DO NOT change enable_multiple_routes.
-    // We let WebRTC gather real local interfaces to generate organic .local mDNS candidates.
-    // We use the native allow_mdns_obfuscation value to mimic Chrome perfectly.
+  if (force_no_udp_egress) {
+    // Non-SOCKS5 forward-mode proxy: see the long comment above
+    // force_no_udp_egress's declaration. enable_nonproxied_udp = false maps
+    // to PORTALLOCATOR_DISABLE_UDP | DISABLE_STUN | DISABLE_UDP_RELAY (see
+    // port_allocator.cc), and PORTALLOCATOR_DISABLE_TCP is added explicitly
+    // below — together these guarantee libwebrtc never creates a single real
+    // local Port (UDP or TCP) for this connection, so there is no real
+    // socket an ICE connectivity check could ever be sent from.
+    port_config.enable_nonproxied_udp = false;
+    VLOG(3) << "WebRTC mode=forward (non-SOCKS5 proxy) -> all real local "
+               "ports disabled; SDP candidates are fully fabricated text.";
+  } else if (effective_mode == WebRtcMode::kForwardUdp) {
+    // SOCKS5 forward mode: We MUST enable UDP so WebRTC creates UDP sockets.
+    // These sockets are transparently intercepted by Socks5UdpTunnel at the
+    // network layer, so no traffic ever leaks directly to the internet.
+    // Without this, Chrome's default proxy policy may disable non-proxied UDP,
+    // preventing WebRTC from gathering any srflx/relay candidates.
     port_config.enable_nonproxied_udp = true;
-    VLOG(3) << "WebRTC mode=forward_udp -> Organic mDNS hiding + Proxied STUN";
+    VLOG(3) << "WebRTC mode=forward (SOCKS5) -> UDP enabled for tunneling";
   } else if (has_replace_proxy_ip) {
-    // Explicitly guarantee UDP is enabled for the 'replace' tier,
-    // overriding any Chromium native proxy-safety policies.
+    // Explicitly guarantee UDP is enabled for the 'replace' tier.
+    // WARNING: This will leak real IP via ICE connectivity checks if the proxy cannot route UDP!
+    // It is kept for legacy compatibility but is inherently unsafe without a UDP-capable VPN/proxy.
     port_config.enable_nonproxied_udp = true;
   } else if (effective_mode == WebRtcMode::kDisabled) {
-    // kDisabled: "Soft Disable" - Mimic AdsPower's behavior.
-    //
-    // Goal: generate "xxx.local typ host" mDNS candidates (avoids Negative
-    // Fingerprint = empty SDP) while NEVER leaking public IP (no srflx).
-    //
-    // Why enable_nonproxied_udp = true (not false):
-    //   port_allocator.cc maps enable_nonproxied_udp=false to:
-    //     PORTALLOCATOR_DISABLE_UDP | PORTALLOCATOR_DISABLE_STUN | ...
-    //   DISABLE_UDP kills local socket creation -> no mDNS host candidates.
-    //   We NEED local UDP binding to generate mDNS entries.
-    //
-    // We block only STUN/Relay AFTER allocator creation via set_flags().
-    port_config.enable_multiple_routes = true;
-    port_config.enable_nonproxied_udp = true;  // keep local UDP alive for mDNS
-    VLOG(3) << "WebRTC mode=disabled -> Soft Disable (mDNS only, STUN blocked by flags)";
+    // kDisabled: Strict Disable.
+    // We MUST set enable_nonproxied_udp = false.
+    // If we set it to true (even to preserve mDNS), outgoing P2P ICE connectivity checks
+    // will bypass the HTTP proxy (which doesn't support UDP) and go directly to the internet,
+    // exposing the real IP to the remote peer's STUN/TURN server (e.g., CreepJS).
+    port_config.enable_multiple_routes = false;
+    port_config.enable_nonproxied_udp = false;
+    VLOG(3) << "WebRTC mode=disabled -> Non-proxied UDP disabled completely to prevent leaks.";
   }
   // kForwardUdp: WebRTC keeps its normal UDP allocator unchanged.
   // The actual UDP tunneling through SOCKS5 is done transparently by
@@ -1224,19 +1312,11 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
 
   std::unique_ptr<webrtc::NetworkManager> network_manager;
   if (port_config.enable_multiple_routes) {
-    // Soft Disable: pass force_mdns_obfuscation=true so local IPs are ALWAYS
-    // hashed to xxx.local regardless of ENUMERATION_ALLOWED state. Other modes
-    // use the 3-arg constructor (force_mdns=false, standard behavior).
-    const bool force_mdns = (effective_mode == WebRtcMode::kDisabled &&
-                             !has_replace_proxy_ip);
-    if (force_mdns) {
-      network_manager = std::make_unique<FilteringNetworkManager>(
-          network_manager_.get(), media_permission, allow_mdns_obfuscation,
-          /*force_mdns_obfuscation=*/true);
-    } else {
-      network_manager = std::make_unique<FilteringNetworkManager>(
-          network_manager_.get(), media_permission, allow_mdns_obfuscation);
-    }
+    // Restore normal Chrome behavior: use the native allow_mdns_obfuscation value.
+    // This will cause both IPv4 and IPv6 host candidates to be hashed to .local
+    // if mDNS is allowed (default), exactly like standard Chrome.
+    network_manager = std::make_unique<FilteringNetworkManager>(
+        network_manager_.get(), media_permission, allow_mdns_obfuscation);
   } else {
     network_manager =
         std::make_unique<blink::EmptyNetworkManager>(network_manager_.get());
@@ -1245,16 +1325,60 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
   auto port_allocator = std::make_unique<P2PPortAllocator>(
       std::move(network_manager), socket_factory_.get(), port_config,
       std::make_unique<LocalNetworkAccessPermissionFactory>(this));
+
+  // FORCE ENABLE IPV6 FOR WEBRTC!
+  // It appears Chromium's P2PPortAllocator does not set this flag by default in this build.
+  // Without this flag, BasicPortAllocator skips all IPv6 network interfaces entirely!
+  uint32_t flags = port_allocator->flags();
+  flags |= webrtc::PORTALLOCATOR_ENABLE_IPV6;
+  flags |= webrtc::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
+  if (requested_forward_mode) {
+    // Anti-detect use case: this profile is not used for real WebRTC calls,
+    // so the loss of TURN/relay fallback for symmetric-NAT peers is an
+    // accepted trade-off. Only TurnPort/relay gathering is disabled here —
+    // PORTALLOCATOR_DISABLE_STUN is deliberately NOT set here (it's added
+    // separately below, only for the force_no_udp_egress case) — forward
+    // mode's SDP should never show a "relay" candidate either way.
+    flags |= webrtc::PORTALLOCATOR_DISABLE_RELAY;
+    // TCP host candidates (tcptype=active, the well-known port-9
+    // placeholder) are also disabled here, for two independent reasons:
+    // (1) confirmed via a side-by-side capture against genuine unmodified
+    // Chrome that real Chrome's own default candidate gathering for this
+    // kind of connection produces no "tcp" candidates at all — their
+    // presence here was a self-inflicted deviation, the same one already
+    // fixed for replace mode below; (2) Socks5UdpTunnel only intercepts
+    // P2P_SOCKET_UDP (see services/network/p2p/socket_manager.cc), so any
+    // real TCP ICE connectivity check would use a genuine unproxied TCP
+    // socket and leak the real public IP exactly like the UDP leak this
+    // whole feature exists to close — disabling TCP gathering here removes
+    // that real local Port entirely, not just its SDP-text appearance.
+    flags |= webrtc::PORTALLOCATOR_DISABLE_TCP;
+    VLOG(3) << "WebRTC mode=forward -> relay/TURN and TCP candidate "
+               "gathering disabled; srflx unaffected.";
+  }
+  if (has_replace_proxy_ip && effective_mode != WebRtcMode::kForwardUdp) {
+    // replace mode: confirmed via a side-by-side capture (genuine
+    // unmodified Chrome vs. this build, same browserleaks/Google-STUN test)
+    // that real Chrome's own default gathering for this scenario produces
+    // ONLY UDP host+srflx candidates — no "tcp" host candidates at all.
+    // Without this flag, BasicPortAllocator also creates TCP host ports
+    // (tcptype=active, the well-known port-9 placeholder), which showed up
+    // as two extra "typ host ... tcp ... 9" lines genuine Chrome never
+    // produced for this connection — a self-inflicted deviation, not
+    // something replace mode needs. TURN/relay gathering is intentionally
+    // left enabled here (unlike forward mode): if a page configures a real
+    // turn: server, genuine Chrome would gather a real relay candidate, and
+    // replace mode's job is to pass real candidates through with the IP
+    // text replaced — not to remove candidate types real Chrome would show.
+    flags |= webrtc::PORTALLOCATOR_DISABLE_TCP;
+    VLOG(3) << "WebRTC mode=replace -> TCP host candidate gathering "
+               "disabled to match genuine Chrome's own default shape; "
+               "UDP/STUN/relay unaffected.";
+  }
+  port_allocator->set_flags(flags);
+
   if (IsValidPortRange(min_port, max_port))
     port_allocator->SetPortRange(min_port, max_port);
-
-  // Disable IPv6 globally for WebRTC in Anti-Detect browser.
-  // This prevents Public IPv6 addresses (bound to physical adapters) 
-  // from leaking as 'host' candidates into the SDP.
-  uint32_t flags = port_allocator->flags();
-  flags &= ~webrtc::PORTALLOCATOR_ENABLE_IPV6;
-  flags &= ~webrtc::PORTALLOCATOR_ENABLE_IPV6_ON_WIFI;
-  port_allocator->set_flags(flags);
 
   // Soft Disable: UDP binding is allowed (for mDNS), but STUN and Relay are
   // disabled so libwebrtc never sends packets to STUN servers (which would
@@ -1267,6 +1391,30 @@ PeerConnectionDependencyFactory::CreatePortAllocator(
     flags |= webrtc::PORTALLOCATOR_DISABLE_UDP_RELAY;
     port_allocator->set_flags(flags);
     VLOG(3) << "WebRTC Soft Disable: STUN+Relay flags set, UDP preserved for mDNS.";
+  }
+
+  // force_no_udp_egress (forward mode, non-SOCKS5 proxy): eliminate every
+  // real local Port, UDP AND TCP. PORTALLOCATOR_DISABLE_STUN only stops
+  // srflx *gathering* (CreateStunPorts in basic_port_allocator.cc) — it does
+  // NOT stop the later ICE connectivity-check ping/pong phase
+  // (Connection::Ping / P2PTransportChannel in third_party/webrtc/p2p), which
+  // runs over whatever real local socket exists as soon as a remote
+  // candidate is received, sending real UDP packets straight out the real
+  // NIC regardless of any SDP-text rewriting. So a real host UDP socket
+  // (even with STUN disabled) is still a leak. The only way to make a
+  // connectivity-check leak impossible is to make sure no real local Port —
+  // UDP (CreateUDPPorts) or TCP (CreateTCPPorts) — ever exists for this
+  // connection. enable_nonproxied_udp=false above already adds
+  // DISABLE_UDP|DISABLE_STUN|DISABLE_UDP_RELAY; DISABLE_TCP closes the
+  // remaining real-socket path. The SDP will have zero real local
+  // candidates; RTCPeerConnectionHandler::SanitizeSdp fully fabricates a
+  // host+srflx pair as pure text so the SDP shape still looks plausible.
+  if (force_no_udp_egress) {
+    flags = port_allocator->flags();
+    flags |= webrtc::PORTALLOCATOR_DISABLE_TCP;
+    port_allocator->set_flags(flags);
+    VLOG(3) << "WebRTC mode=forward (non-SOCKS5 proxy): all real local ports "
+               "disabled (UDP+STUN+TCP); candidates are fully fabricated.";
   }
 
   return port_allocator;

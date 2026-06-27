@@ -60,7 +60,7 @@ net::NetworkTrafficAnnotationTag GetTrafficAnnotation() {
           "instead of being sent directly. The TCP control connection is kept "
           "open for the lifetime of the WebRTC session."
         trigger:
-          "Created when --webrtc-mode=forward_udp is active and a WebRTC "
+          "Created when --webrtc-mode=forward is active and a WebRTC "
           "PeerConnection is established."
         data:
           "SOCKS5 handshake bytes and subsequent WebRTC UDP datagrams "
@@ -72,7 +72,7 @@ net::NetworkTrafficAnnotationTag GetTrafficAnnotation() {
         cookies_allowed: NO
         setting:
           "Enabled only when Chrome is launched with "
-          "--webrtc-mode=forward_udp."
+          "--webrtc-mode=forward."
         policy_exception_justification: "Not a user-visible network request."
       })");
 }
@@ -115,7 +115,7 @@ Socks5UdpTunnel::~Socks5UdpTunnel() {
 int Socks5UdpTunnel::Listen(const net::IPEndPoint& address) {
   DCHECK_EQ(state_, State::kInit);
   local_udp_address_ = address;
-  LOG(INFO) << "Socks5UdpTunnel: Listen called with address=" << address.ToString();
+  VLOG(1) << "Socks5UdpTunnel: Listen called with address=" << address.ToString();
   state_ = State::kConnecting;
   DoConnect();
   return net::ERR_IO_PENDING;
@@ -144,7 +144,7 @@ void Socks5UdpTunnel::DoConnect() {
 
 void Socks5UdpTunnel::OnConnectDone(int result) {
   if (result != net::OK) {
-    LOG(ERROR) << "Socks5UdpTunnel: TCP connect failed: " << result;
+    VLOG(1) << "Socks5UdpTunnel: TCP connect failed: " << result;
     OnSetupComplete(result);
     return;
   }
@@ -183,7 +183,7 @@ void Socks5UdpTunnel::SendGreeting() {
 
 void Socks5UdpTunnel::OnGreetingSent(int result) {
   if (result < 0) {
-    LOG(ERROR) << "Socks5UdpTunnel: greeting write failed: " << result;
+    VLOG(1) << "Socks5UdpTunnel: greeting write failed: " << result;
     OnSetupComplete(result);
     return;
   }
@@ -216,7 +216,7 @@ void Socks5UdpTunnel::DoReadServerChoice() {
 
 void Socks5UdpTunnel::OnServerChoiceRead(int result) {
   if (result <= 0) {
-    LOG(ERROR) << "Socks5UdpTunnel: server choice read failed, result="
+    VLOG(1) << "Socks5UdpTunnel: server choice read failed, result="
                << result;
     OnSetupComplete(result == 0 ? net::ERR_CONNECTION_CLOSED : result);
     return;
@@ -231,7 +231,7 @@ void Socks5UdpTunnel::OnServerChoiceRead(int result) {
   reader.ReadU8BigEndian(ver);
   reader.ReadU8BigEndian(method);
   if (ver != kSocks5Version || method == kSocks5MethodNoAccept) {
-    LOG(ERROR) << "Socks5UdpTunnel: proxy rejected auth. METHOD=0x"
+    VLOG(1) << "Socks5UdpTunnel: proxy rejected auth. METHOD=0x"
                << std::hex << static_cast<int>(method);
     OnSetupComplete(net::ERR_FAILED);
     return;
@@ -277,7 +277,7 @@ void Socks5UdpTunnel::SendAuth() {
 
 void Socks5UdpTunnel::OnAuthSent(int result) {
   if (result < 0) {
-    LOG(ERROR) << "Socks5UdpTunnel: auth write failed: " << result;
+    VLOG(1) << "Socks5UdpTunnel: auth write failed: " << result;
     OnSetupComplete(result);
     return;
   }
@@ -300,7 +300,7 @@ void Socks5UdpTunnel::ReadAuthReply() {
 
 void Socks5UdpTunnel::OnAuthReplyRead(int result) {
   if (result <= 0) {
-    LOG(ERROR) << "Socks5UdpTunnel: auth reply read failed: " << result;
+    VLOG(1) << "Socks5UdpTunnel: auth reply read failed: " << result;
     OnSetupComplete(result == 0 ? net::ERR_CONNECTION_CLOSED : result);
     return;
   }
@@ -309,7 +309,7 @@ void Socks5UdpTunnel::OnAuthReplyRead(int result) {
   reader.ReadU8BigEndian(ver);
   reader.ReadU8BigEndian(status);
   if (status != 0x00) {
-    LOG(ERROR) << "Socks5UdpTunnel: proxy rejected credentials (status="
+    VLOG(1) << "Socks5UdpTunnel: proxy rejected credentials (status="
                << static_cast<int>(status) << "). Check username/password.";
     OnSetupComplete(net::ERR_PROXY_AUTH_UNSUPPORTED);
     return;
@@ -349,7 +349,7 @@ void Socks5UdpTunnel::SendAssociateRequest() {
 
 void Socks5UdpTunnel::OnAssociateRequestSent(int result) {
   if (result < 0) {
-    LOG(ERROR) << "Socks5UdpTunnel: ASSOCIATE write failed: " << result;
+    VLOG(1) << "Socks5UdpTunnel: ASSOCIATE write failed: " << result;
     OnSetupComplete(result);
     return;
   }
@@ -377,7 +377,7 @@ void Socks5UdpTunnel::DoReadAssociateReply() {
     } else if (atyp == kSocks5AtypIpv6) {
       target_len = 22;
     } else {
-      LOG(ERROR) << "Socks5UdpTunnel: unsupported ATYP in reply: "
+      VLOG(1) << "Socks5UdpTunnel: unsupported ATYP in reply: "
                  << static_cast<int>(atyp);
       OnSetupComplete(net::ERR_FAILED);
       return;
@@ -402,7 +402,7 @@ void Socks5UdpTunnel::DoReadAssociateReply() {
 
 void Socks5UdpTunnel::OnAssociateReplyRead(int result) {
   if (result <= 0) {
-    LOG(ERROR) << "Socks5UdpTunnel: ASSOCIATE reply read failed, result="
+    VLOG(1) << "Socks5UdpTunnel: ASSOCIATE reply read failed, result="
                << result;
     OnSetupComplete(result == 0 ? net::ERR_CONNECTION_CLOSED : result);
     return;
@@ -420,16 +420,11 @@ void Socks5UdpTunnel::ProcessAssociateReply() {
   reader.ReadU8BigEndian(atyp);
 
   if (ver != kSocks5Version || rep != kSocks5RepSuccess) {
-    LOG(ERROR) << "Socks5UdpTunnel: ASSOCIATE failed, REP=0x"
-               << std::hex << static_cast<int>(rep)
-               << ". FAKING SUCCESS to preserve 'host' candidate!";
-    // If the proxy doesn't support UDP, we STILL need to pretend it succeeded,
-    // otherwise the UDP port fails instantly, and WebRTC generates an empty SDP!
-    // A browser with NO host candidates is highly suspicious.
-    // By faking success, the UDP socket stays alive, drops outgoing packets silently,
-    // and WebRTC naturally times out STUN. But the 'host' candidate is preserved!
-    fake_success_ = true;
-    BindLocalUdp(local_udp_address_);
+    VLOG(1) << "Socks5UdpTunnel: ASSOCIATE failed, REP=0x" << std::hex
+            << static_cast<int>(rep);
+    // Report the real failure. The owner (P2PSocketUdp) decides whether to
+    // fall back to a native unproxied socket; this class never fakes success.
+    OnSetupComplete(net::ERR_FAILED);
     return;
   }
 
@@ -438,13 +433,25 @@ void Socks5UdpTunnel::ProcessAssociateReply() {
     OnSetupComplete(net::ERR_FAILED);
     return;
   }
-  // Proxies behind NAT or Docker (like Gost) often return their internal IP 
-  // (e.g. 172.24.0.2) in the ASSOCIATE reply. The client cannot route to this IP.
-  // We MUST always use the original proxy IP we connected to.
-  relay_endpoint_ = net::IPEndPoint(proxy_endpoint_.address(), relay.port());
-  
-  LOG(INFO) << "Socks5UdpTunnel: relay=" << relay_endpoint_.ToString() 
-            << " (original proxy IP forced)";
+  // Proxies behind NAT or Docker (e.g. Gost) often return an unroutable
+  // internal address (RFC1918, CGNAT, link-local, loopback, or "any") in the
+  // ASSOCIATE reply's BND.ADDR. The client cannot route to such an address,
+  // so in that case we fall back to the original --proxy-server IP we
+  // connected to. If the reply instead contains a routable public address —
+  // e.g. a distributed/load-balanced proxy backend whose UDP-handling node
+  // legitimately differs from the TCP control-connection IP — we trust and
+  // use it as-is, since forcing the control IP there would send packets to
+  // the wrong node.
+  if (!relay.address().IsPubliclyRoutable()) {
+    relay_endpoint_ = net::IPEndPoint(proxy_endpoint_.address(), relay.port());
+    VLOG(1) << "Socks5UdpTunnel: BND.ADDR " << relay.address().ToString()
+            << " is unroutable; using original proxy IP instead: "
+            << relay_endpoint_.ToString();
+  } else {
+    relay_endpoint_ = relay;
+    VLOG(1) << "Socks5UdpTunnel: trusting routable BND.ADDR from proxy: "
+            << relay_endpoint_.ToString();
+  }
   BindLocalUdp(local_udp_address_);
 }
 
@@ -472,7 +479,7 @@ bool Socks5UdpTunnel::ParseAssociateReply(
     *relay_out = net::IPEndPoint(addr, port);
     return true;
   }
-  LOG(ERROR) << "Socks5UdpTunnel: unsupported ATYP: "
+  VLOG(1) << "Socks5UdpTunnel: unsupported ATYP: "
              << static_cast<int>(atyp);
   return false;
 }
@@ -490,7 +497,7 @@ void Socks5UdpTunnel::BindLocalUdp(const net::IPEndPoint& local_hint) {
   net::IPEndPoint bind_addr(local_hint.address(), 0);
   int rv = udp_socket_->Listen(bind_addr);
   if (rv != net::OK) {
-    LOG(ERROR) << "Socks5UdpTunnel: UDP bind failed: " << rv;
+    VLOG(1) << "Socks5UdpTunnel: UDP bind failed: " << rv;
     OnSetupComplete(rv);
     return;
   }
@@ -498,6 +505,10 @@ void Socks5UdpTunnel::BindLocalUdp(const net::IPEndPoint& local_hint) {
   if (udp_socket_->GetLocalAddress(&actual_local) == net::OK) {
     local_udp_address_ = actual_local;
   }
+  VLOG(1) << "Socks5UdpTunnel: bound local UDP for interface "
+          << local_hint.address().ToString() << " -> "
+          << local_udp_address_.ToString() << ", relay="
+          << relay_endpoint_.ToString();
 
   udp_recv_buf_ =
       base::MakeRefCounted<net::IOBufferWithSize>(kUdpRelayReadBufferSize);
@@ -551,21 +562,18 @@ int Socks5UdpTunnel::SendTo(net::IOBuffer* buf,
   if (state_ != State::kReady)
     return net::ERR_FAILED;
 
-  if (fake_success_) {
-    // Silently drop the packet into the void.
-    // Return the amount of bytes requested to pretend it was sent successfully!
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(std::move(callback), buf_len));
-    return net::ERR_IO_PENDING;
-  }
-
   int wrapped_len = 0;
   auto wrapped = WrapUdpPacket(buf, buf_len, address, &wrapped_len);
   if (!wrapped)
     return net::ERR_ADDRESS_INVALID;
 
-  return udp_socket_->SendTo(wrapped.get(), wrapped_len, relay_endpoint_,
-                             std::move(callback));
+  int rv = udp_socket_->SendTo(wrapped.get(), wrapped_len, relay_endpoint_,
+                                std::move(callback));
+  VLOG(2) << "Socks5UdpTunnel[" << local_udp_address_.ToString()
+          << "]: SendTo dest=" << address.ToString()
+          << " payload_len=" << buf_len << " wrapped_len=" << wrapped_len
+          << " relay=" << relay_endpoint_.ToString() << " rv=" << rv;
+  return rv;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -576,8 +584,11 @@ bool Socks5UdpTunnel::UnwrapUdpPacket(
     base::span<const uint8_t> data,
     net::IPEndPoint* source_out,
     base::span<const uint8_t>* payload_span_out) {
-  if (static_cast<int>(data.size()) < kUdpHeaderMinLen)
+  if (static_cast<int>(data.size()) < kUdpHeaderMinLen) {
+    VLOG(1) << "Socks5UdpTunnel: dropping undersized datagram, len="
+            << data.size();
     return false;
+  }
 
   base::SpanReader<const uint8_t> reader(data);
   uint16_t rsv = 0;
@@ -608,6 +619,8 @@ bool Socks5UdpTunnel::UnwrapUdpPacket(
     base::span(addr_bytes).copy_from(*addr_opt);
     src_addr = net::IPAddress(addr_bytes);
   } else {
+    VLOG(1) << "Socks5UdpTunnel: dropping datagram, unsupported ATYP=0x"
+            << std::hex << static_cast<int>(atyp);
     return false;
   }
 
@@ -628,13 +641,6 @@ int Socks5UdpTunnel::RecvFrom(net::IOBuffer* buf,
   pending_recv_address_ = address;
   pending_recv_callback_ = std::move(callback);
 
-  if (fake_success_) {
-    // If fake_success is true, we never receive any packets from the proxy!
-    // Just leave the callback pending forever (or until the socket is closed).
-    // This perfectly mimics a firewall dropping incoming packets.
-    return net::ERR_IO_PENDING;
-  }
-
   DoRecvFrom();
   return net::ERR_IO_PENDING;
 }
@@ -650,12 +656,18 @@ void Socks5UdpTunnel::DoRecvFrom() {
 
 void Socks5UdpTunnel::OnRecvFrom(int result) {
   if (result <= 0) {
+    VLOG(1) << "Socks5UdpTunnel[" << local_udp_address_.ToString()
+            << "]: RecvFrom from relay " << relay_endpoint_.ToString()
+            << " failed/closed, result=" << result;
     if (pending_recv_callback_) {
       std::move(pending_recv_callback_)
           .Run(result == 0 ? net::ERR_FAILED : result);
     }
     return;
   }
+
+  VLOG(2) << "Socks5UdpTunnel[" << local_udp_address_.ToString()
+          << "]: RecvFrom raw bytes from relay=" << result;
 
   base::span<const uint8_t> raw_span(
       udp_recv_buf_->span().first(static_cast<size_t>(result)));

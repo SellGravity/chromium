@@ -13,6 +13,7 @@
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/webrtc/api/local_network_access_permission.h"
 #include "third_party/webrtc_overrides/environment.h"
+#include "base/command_line.h"
 
 namespace blink {
 
@@ -44,6 +45,12 @@ P2PPortAllocator::P2PPortAllocator(
              webrtc::PORTALLOCATOR_DISABLE_STUN |
              webrtc::PORTALLOCATOR_DISABLE_UDP_RELAY;
   }
+  
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch("webrtc-mode") &&
+      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("webrtc-mode") == "forward") {
+    flags |= webrtc::PORTALLOCATOR_DISABLE_RELAY;
+  }
+
   set_flags(flags);
   set_allow_tcp_listen(false);
 }

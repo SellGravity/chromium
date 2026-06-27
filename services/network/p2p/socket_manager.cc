@@ -38,6 +38,7 @@
 #include "base/command_line.h"
 #include "net/base/host_port_pair.h"
 
+
 namespace network {
 
 namespace {
@@ -48,45 +49,43 @@ const uint8_t kPublicIPv4Host[] = {8, 8, 8, 8};
 const uint8_t kPublicIPv6Host[] = {
     0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88};
 
-// // Parse "socks5://[user:pass@]host:port" or "http://[user:pass@]host:port"
-// from --proxy-server flag. Populates |endpoint_out|; if |username_out| and
-// |password_out| are non-null also extracts embedded credentials.
-// Returns false if the flag is absent or the host is not a numeric IP.
+// Parses "socks5://[user:pass@]host:port" from --proxy-server. Populates
+// |endpoint_out| (and |username_out|/|password_out| if embedded credentials
+// are present). Returns false if the flag is absent, the scheme isn't
+// socks5://, or the host isn't a numeric IP literal (forward mode's real UDP
+// tunnel requires a literal IP — see the matching check in
+// peer_connection_dependency_factory.cc's CreatePortAllocator, which decides
+// whether to fall back to force_no_udp_egress for this same reason).
 bool GetSocks5ProxyEndpointWithAuth(net::IPEndPoint* endpoint_out,
-                                    std::string* username_out,
-                                    std::string* password_out) {
-  LOG(ERROR) << "GetSocks5ProxyEndpointWithAuth called!";
+                                     std::string* username_out,
+                                     std::string* password_out) {
   const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
   if (!cmd || !cmd->HasSwitch("proxy-server")) {
-    LOG(ERROR) << "GetSocks5ProxyEndpointWithAuth: no proxy-server switch";
     return false;
   }
 
   std::string proxy_str = cmd->GetSwitchValueASCII("proxy-server");
-
-  // We ONLY allow socks5:// prefix for forward_udp.
-  // Any other prefix (http://, https://) or no prefix means we cannot establish UDP ASSOCIATE.
   if (proxy_str.rfind("socks5://", 0) == 0) {
     proxy_str = proxy_str.substr(strlen("socks5://"));
   } else {
-    LOG(ERROR) << "GetSocks5ProxyEndpointWithAuth: Invalid scheme. Only socks5:// is supported for UDP tunneling. Got: " << proxy_str;
     return false;
   }
 
-  // Check if credentials were automatically extracted by chrome_main_delegate.cc
-  bool has_separate_creds = cmd->HasSwitch("proxy-auth-user") && cmd->HasSwitch("proxy-auth-pass");
+  // Credentials may have already been extracted into separate switches
+  // upstream (e.g. by chrome_main_delegate.cc); prefer those if present.
+  bool has_separate_creds =
+      cmd->HasSwitch("proxy-auth-user") && cmd->HasSwitch("proxy-auth-pass");
   if (has_separate_creds && username_out && password_out) {
     *username_out = cmd->GetSwitchValueASCII("proxy-auth-user");
     *password_out = cmd->GetSwitchValueASCII("proxy-auth-pass");
   }
 
-  // Extract user:pass@  if present (fallback for testing without chrome_main_delegate)
+  // Fallback: extract user:pass@ embedded directly in --proxy-server.
   std::string host_port_str = proxy_str;
   auto at_pos = proxy_str.rfind('@');
   if (at_pos != std::string::npos) {
     std::string creds = proxy_str.substr(0, at_pos);
     host_port_str = proxy_str.substr(at_pos + 1);
-    
     if (username_out && password_out && !has_separate_creds) {
       auto colon_pos = creds.find(':');
       if (colon_pos != std::string::npos) {
@@ -98,33 +97,39 @@ bool GetSocks5ProxyEndpointWithAuth(net::IPEndPoint* endpoint_out,
     }
   }
 
-  // Strip trailing slashes that might break HostPortPair parsing
   while (!host_port_str.empty() && host_port_str.back() == '/') {
     host_port_str.pop_back();
   }
 
   net::HostPortPair hpp = net::HostPortPair::FromString(host_port_str);
-  if (hpp.IsEmpty()) return false;
+  if (hpp.IsEmpty()) {
+    return false;
+  }
 
   net::IPAddress addr;
   if (!addr.AssignFromIPLiteral(hpp.host())) {
-    VLOG(1) << "Socks5UdpTunnel: --proxy-server host is not a numeric IP. "
-               "forward_udp requires an IP address, not a hostname.";
+    VLOG(1) << "Socks5UdpTunnel: --proxy-server host '" << hpp.host()
+            << "' is not a numeric IP literal; forward mode's real UDP "
+               "tunnel requires one (a hostname can't be tunneled here).";
     return false;
   }
   *endpoint_out = net::IPEndPoint(addr, hpp.port());
   return true;
 }
 
-
-// Returns true if --webrtc-mode=forward_udp is active.
+// True when --webrtc-mode=forward is active. Matches the mode string used by
+// peer_connection_dependency_factory.cc and rtc_peer_connection_handler.cc
+// (kForwardUdp / "forward") — NOT the older "forward_udp" string this
+// function used to check, which never matched and silently meant this whole
+// SOCKS5 tunnel injection block was permanently dead code.
 bool IsForwardUdpMode() {
   const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
   if (!cmd || !cmd->HasSwitch("webrtc-mode")) {
     return false;
   }
-  return cmd->GetSwitchValueASCII("webrtc-mode") == "forward_udp";
+  return cmd->GetSwitchValueASCII("webrtc-mode") == "forward";
 }
+
 const int kPublicPort = 53;  // DNS port.
 
 // Experimentation shows that creating too many sockets creates odd problems
@@ -502,24 +507,21 @@ void P2PSocketManager::CreateSocket(
     return;
   }
 
-  // ── Socks5UdpTunnel injection for --webrtc-mode=forward_udp ──────────────
-  // When forward_udp is active and the socket being created is a UDP P2P
-  // socket, replace the default UDPServerSocket factory with Socks5UdpTunnel.
-  // Credentials embedded in --proxy-server (user:pass@host:port) are parsed
-  // and passed to the tunnel for RFC 1929 username/password sub-negotiation.
+  // ── Socks5UdpTunnel injection for --webrtc-mode=forward ─────────────────
+  // When forward mode is active with a literal-IP socks5:// proxy, replace
+  // the default UDPServerSocket factory with Socks5UdpTunnel so the actual
+  // ICE/STUN/DTLS/SRTP UDP datagrams are genuinely relayed through the proxy
+  // at the network layer (not just cosmetically rewritten in the SDP text
+  // that rtc_peer_connection_handler.cc's SanitizeSdp exposes to JS).
   if (type == P2P_SOCKET_UDP && IsForwardUdpMode()) {
     net::IPEndPoint proxy_endpoint;
     std::string proxy_username, proxy_password;
-    if (GetSocks5ProxyEndpointWithAuth(&proxy_endpoint,
-                                       &proxy_username, &proxy_password)) {
+    if (GetSocks5ProxyEndpointWithAuth(&proxy_endpoint, &proxy_username,
+                                        &proxy_password)) {
       net::NetLog* net_log = url_request_context_->net_log();
-      // Build the factory: each call creates a new Socks5UdpTunnel bound to
-      // the same proxy endpoint. Credentials are captured by value so each
-      // tunnel instance gets its own copy for the auth sub-negotiation.
       P2PSocketUdp::DatagramServerSocketFactory socks5_factory =
           base::BindRepeating(
-              [](net::IPEndPoint proxy_ep,
-                 std::string username,
+              [](net::IPEndPoint proxy_ep, std::string username,
                  std::string password,
                  net::NetLog* log) -> std::unique_ptr<net::DatagramServerSocket> {
                 return std::make_unique<Socks5UdpTunnel>(
@@ -534,14 +536,16 @@ void P2PSocketManager::CreateSocket(
 
       P2PSocket* socket_ptr = socket.get();
       sockets_[socket_ptr] = std::move(socket);
-      socket_ptr->Init(local_address, port_range.min_port, port_range.max_port,
-                       remote_address, network_anonymization_key_);
+      socket_ptr->Init(local_address, port_range.min_port,
+                        port_range.max_port, remote_address,
+                        network_anonymization_key_);
       return;
-    } else {
-      LOG(WARNING) << "forward_udp: --proxy-server is missing, invalid, or not a SOCKS5 proxy. "
-                   << "KILL-SWITCH ACTIVATED: Blocking UDP socket creation to prevent IP leaks.";
-      return; // Do NOT fall through to P2PSocket::Create! WebRTC will safely fall back to TCP.
     }
+    // Non-SOCKS5 proxy (HTTP/SOCKS4/hostname): fall through to the regular
+    // native UDP path below. peer_connection_dependency_factory.cc's
+    // force_no_udp_egress already disables STUN at the port-allocator level
+    // for this case, so no real srflx gets gathered via this native socket —
+    // it only ever carries host-candidate traffic.
   }
   // ─────────────────────────────────────────────────────────────────────────
 

@@ -46,8 +46,10 @@ namespace network {
 //             and real source address to caller.
 //
 // If tunnel setup fails (TCP connect error, SOCKS5 reject, etc.), the socket
-// enters kError state and all subsequent operations return net::ERR_FAILED.
-// There is NO silent fallback to TCP.
+// enters kError state, the listen-done callback is invoked with the real net
+// error, and all subsequent operations return net::ERR_FAILED. This class
+// never silently fakes success; P2PSocketUdp (the owner) decides whether to
+// fall back to a native unproxied socket on failure.
 class COMPONENT_EXPORT(NETWORK_SERVICE) Socks5UdpTunnel
     : public net::DatagramServerSocket {
  public:
@@ -122,6 +124,13 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) Socks5UdpTunnel
   // async SOCKS5 handshake completes. |callback| is invoked with net::OK on
   // success or a net error code on failure.
   void SetListenDoneCallback(net::CompletionOnceCallback callback);
+
+  // The configured SOCKS5 proxy address. Valid for the lifetime of this
+  // object regardless of handshake outcome. Used by the owner (P2PSocketUdp)
+  // when falling back to NoEgressUdpSocket on UDP ASSOCIATE failure, so the
+  // fallback socket's fake STUN responses can report this machine's
+  // configured proxy IP as the (fabricated) external address.
+  const net::IPEndPoint& proxy_endpoint() const { return proxy_endpoint_; }
 
  private:
   // ── State machine ─────────────────────────────────────────────────────────
@@ -201,7 +210,6 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) Socks5UdpTunnel
   net::IPEndPoint proxy_endpoint_;
   net::IPEndPoint local_udp_address_;  // filled after BindLocalUdp()
   net::IPEndPoint relay_endpoint_;     // BND.ADDR:BND.PORT from proxy reply
-  bool fake_success_ = false;
 
   // Optional proxy credentials for RFC 1929 username/password auth.
   std::string username_;

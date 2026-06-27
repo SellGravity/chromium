@@ -5,18 +5,22 @@
 #include "services/network/p2p/socket_udp.h"
 
 #include <tuple>
+#include <vector>
 
 #include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/weak_ptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/strings/stringprintf.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
 #include "net/base/backoff_entry.h"
 #include "net/base/io_buffer.h"
+#include "net/base/ip_address.h"
 #include "net/base/net_errors.h"
 #include "net/base/port_util.h"
 #include "net/log/net_log_source.h"
@@ -28,7 +32,10 @@
 #include "services/network/throttling/throttling_network_interceptor.h"
 #include "services/network/throttling/throttling_p2p_network_interceptor.h"
 #include "third_party/perfetto/include/perfetto/tracing/track.h"
+#include "third_party/webrtc/api/transport/stun.h"
 #include "third_party/webrtc/media/base/rtp_utils.h"
+#include "third_party/webrtc/rtc_base/byte_buffer.h"
+#include "third_party/webrtc/rtc_base/socket_address.h"
 #include "third_party/webrtc/rtc_base/time_utils.h"
 
 namespace {
@@ -120,6 +127,232 @@ std::unique_ptr<net::DatagramServerSocket> DefaultSocketFactory(
   return base::WrapUnique(socket);
 }
 
+// A UDP socket that binds/listens normally — so a real local port exists and
+// a genuine "host" ICE candidate is produced, mDNS-obfuscated exactly like
+// real Chrome — and never actually sends or receives a single real packet
+// over the network. Used as the fallback when a Socks5UdpTunnel's UDP
+// ASSOCIATE fails at runtime (see P2PSocketUdp::OnSocks5ListenDone): some
+// SOCKS5 proxies are entirely real and working for ordinary TCP traffic but
+// reply REP=0x7 "command not supported" to UDP ASSOCIATE specifically.
+// Falling back to a real unproxied UDP socket there would let WebRTC use it
+// for actual ICE connectivity-check pings — which are STUN-format packets
+// sent directly peer-to-peer, not just to a configured STUN server — silently
+// leaking the real public IP over the network exactly like the leak this
+// whole project exists to close.
+//
+// Rather than blocking every send/recv unconditionally (this class's
+// original behavior), STUN Binding Requests specifically — which is what
+// WebRTC's own StunPort sends to gather a srflx candidate — get a locally
+// synthesized STUN Binding Success Response with XOR-MAPPED-ADDRESS set to
+// |fake_external_ip_|, without ever putting a packet on the wire. This makes
+// WebRTC's own gathering logic create a genuinely real srflx Candidate in its
+// internal pool (not just SDP text), so it shows up correctly in
+// getStats()/chrome://webrtc-internals too — see SanitizeSdp's comment
+// elsewhere in this file for why pure SDP-text fabrication can't reach those.
+// Any other packet (real media, or a real ICE connectivity-check ping to an
+// actual remote peer) gets no response, same as before — this profile's use
+// case (leak-detection test pages) never pairs these candidates with a real
+// second peer, so that distinction is moot in practice; see
+// force_no_udp_egress in peer_connection_dependency_factory.cc for the same
+// "not used for real calls" trade-off applied to non-SOCKS5 proxies.
+class NoEgressUdpSocket : public net::DatagramServerSocket {
+ public:
+  NoEgressUdpSocket(net::NetLog* net_log,
+                    const net::IPAddress& fake_external_ip)
+      : socket_(net_log, net::NetLogSource()),
+        fake_external_ip_(fake_external_ip) {
+#if BUILDFLAG(IS_WIN)
+    socket_.UseNonBlockingIO();
+#endif
+  }
+  ~NoEgressUdpSocket() override = default;
+
+  int Listen(const net::IPEndPoint& address) override {
+    return socket_.Listen(address);
+  }
+  int RecvFrom(net::IOBuffer* buf,
+               int buf_len,
+               net::IPEndPoint* address,
+               net::CompletionOnceCallback callback) override {
+    if (!pending_fake_response_.empty()) {
+      size_t copy_len = std::min(pending_fake_response_.size(),
+                                 static_cast<size_t>(buf_len));
+      buf->span().first(copy_len).copy_from(
+          base::span(pending_fake_response_).first(copy_len));
+      *address = pending_fake_response_from_;
+      pending_fake_response_.clear();
+      return static_cast<int>(copy_len);
+    }
+    // No real network I/O ever happens on this socket (see class comment
+    // above) — stay pending, matching genuine async DatagramServerSocket
+    // semantics, until SendTo() synthesizes a fake STUN response for us to
+    // deliver via CompleteRecvFrom(). Returning a synchronous error here
+    // instead (this class's original behavior) made
+    // P2PSocketUdp::HandleReadResult() treat it as a fatal socket error and
+    // immediately call OnError(), destroying the owning P2PSocketUdp (and
+    // resetting its mojo connection) before WebRTC ever got a chance to send
+    // a STUN request over it — there was no live channel left to answer.
+    pending_recv_buf_ = buf;
+    pending_recv_buf_len_ = buf_len;
+    pending_recv_address_ = address;
+    pending_recv_callback_ = std::move(callback);
+    return net::ERR_IO_PENDING;
+  }
+  int SendTo(net::IOBuffer* buf,
+             int buf_len,
+             const net::IPEndPoint& address,
+             net::CompletionOnceCallback callback) override {
+    std::vector<uint8_t> fake_response =
+        MaybeBuildFakeStunResponse(buf, buf_len);
+    if (!fake_response.empty()) {
+      VLOG(1) << "NoEgressUdpSocket: faking STUN Binding Success Response "
+                 "for request to " << address.ToString()
+              << " (no real packet sent — see class comment)";
+      // Posted, not delivered inline: SendTo() runs from inside WebRTC's own
+      // send path, and completing the matching RecvFrom() callback
+      // synchronously from here would re-enter P2PSocketUdp's read loop
+      // (DoRead() -> OnRecv() -> DoRead()) from within DoSend()'s call
+      // stack — real network I/O could never do that, and callers up the
+      // stack assume async completions run from a fresh task.
+      base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+          FROM_HERE,
+          base::BindOnce(&NoEgressUdpSocket::CompleteRecvFrom,
+                         weak_factory_.GetWeakPtr(), std::move(fake_response),
+                         address));
+      return buf_len;  // Pretend the send succeeded.
+    }
+    VLOG(1) << "NoEgressUdpSocket: blocked outgoing packet to "
+            << address.ToString()
+            << " (not a STUN Binding Request, or this socket has no fake "
+               "external address configured)";
+    return net::ERR_FAILED;
+  }
+  int SetReceiveBufferSize(int32_t size) override {
+    return socket_.SetReceiveBufferSize(size);
+  }
+  int SetSendBufferSize(int32_t size) override {
+    return socket_.SetSendBufferSize(size);
+  }
+  void AllowAddressReuse() override { socket_.AllowAddressReuse(); }
+  void AllowBroadcast() override { socket_.AllowBroadcast(); }
+  void AllowAddressSharingForMulticast() override {
+    socket_.AllowAddressSharingForMulticast();
+  }
+  int JoinGroup(const net::IPAddress& group_address) const override {
+    return net::ERR_NOT_IMPLEMENTED;
+  }
+  int LeaveGroup(const net::IPAddress& group_address) const override {
+    return net::ERR_NOT_IMPLEMENTED;
+  }
+  int SetMulticastInterface(uint32_t interface_index) override {
+    return net::ERR_NOT_IMPLEMENTED;
+  }
+  int SetMulticastTimeToLive(int time_to_live) override {
+    return net::ERR_NOT_IMPLEMENTED;
+  }
+  int SetMulticastLoopbackMode(bool loopback) override {
+    return net::ERR_NOT_IMPLEMENTED;
+  }
+  int SetDiffServCodePoint(net::DiffServCodePoint dscp) override {
+    return socket_.SetDiffServCodePoint(dscp);
+  }
+  void DetachFromThread() override { socket_.DetachFromThread(); }
+  void Close() override { socket_.Close(); }
+  int GetPeerAddress(net::IPEndPoint* address) const override {
+    return net::ERR_FAILED;
+  }
+  int GetLocalAddress(net::IPEndPoint* address) const override {
+    return socket_.GetLocalAddress(address);
+  }
+  void UseNonBlockingIO() override { socket_.UseNonBlockingIO(); }
+  int SetDoNotFragment() override { return socket_.SetDoNotFragment(); }
+  int SetRecvTos() override { return socket_.SetRecvTos(); }
+  int SetTos(net::DiffServCodePoint dscp, net::EcnCodePoint ecn) override {
+    return socket_.SetTos(dscp, ecn);
+  }
+  void SetMsgConfirm(bool confirm) override {}
+  const net::NetLogWithSource& NetLog() const override {
+    return socket_.NetLog();
+  }
+  net::DscpAndEcn GetLastTos() const override { return socket_.GetLastTos(); }
+
+ private:
+  // Returns a serialized STUN Binding Success Response (XOR-MAPPED-ADDRESS =
+  // |fake_external_ip_|:local-port) if |buf| is a STUN Binding Request,
+  // otherwise an empty vector. See the class comment for why a real ICE
+  // connectivity-check ping (also STUN Binding Request format) gets the same
+  // treatment without that being a problem in practice.
+  std::vector<uint8_t> MaybeBuildFakeStunResponse(net::IOBuffer* buf,
+                                                  int buf_len) {
+    if (buf_len <= 0 || fake_external_ip_.empty()) {
+      return {};
+    }
+    webrtc::ByteBufferReader reader(webrtc::MakeArrayView(
+        reinterpret_cast<const uint8_t*>(buf->data()),
+        static_cast<size_t>(buf_len)));
+    webrtc::StunMessage request;
+    if (!request.Read(&reader) ||
+        request.type() != webrtc::STUN_BINDING_REQUEST) {
+      return {};
+    }
+    net::IPEndPoint local_address;
+    int port = 0;
+    if (socket_.GetLocalAddress(&local_address) == net::OK) {
+      port = local_address.port();
+    }
+    webrtc::SocketAddress mapped_address(fake_external_ip_.ToString(), port);
+    webrtc::StunMessage response(webrtc::STUN_BINDING_RESPONSE,
+                                 request.transaction_id());
+    response.AddAttribute(std::make_unique<webrtc::StunXorAddressAttribute>(
+        webrtc::STUN_ATTR_XOR_MAPPED_ADDRESS, mapped_address));
+    webrtc::ByteBufferWriter writer;
+    if (!response.Write(&writer)) {
+      return {};
+    }
+    webrtc::ArrayView<const uint8_t> written = writer.DataView();
+    return std::vector<uint8_t>(written.begin(), written.end());
+  }
+
+  // Delivers |response| to a RecvFrom() caller: immediately if one is
+  // already waiting, or queued for the next RecvFrom() call otherwise (a
+  // real race is possible since SendTo() and RecvFrom() are independent
+  // calls from WebRTC's perspective).
+  void CompleteRecvFrom(std::vector<uint8_t> response,
+                        net::IPEndPoint from_address) {
+    if (!pending_recv_callback_) {
+      pending_fake_response_ = std::move(response);
+      pending_fake_response_from_ = from_address;
+      return;
+    }
+    size_t copy_len = std::min(response.size(),
+                               static_cast<size_t>(pending_recv_buf_len_));
+    pending_recv_buf_->span().first(copy_len).copy_from(
+        base::span(response).first(copy_len));
+    *pending_recv_address_ = from_address;
+    net::CompletionOnceCallback callback = std::move(pending_recv_callback_);
+    pending_recv_buf_ = nullptr;
+    pending_recv_address_ = nullptr;
+    std::move(callback).Run(static_cast<int>(copy_len));
+  }
+
+  net::UDPServerSocket socket_;
+  net::IPAddress fake_external_ip_;
+
+  // Pending RecvFrom() state, valid only while a call is outstanding
+  // (net::ERR_IO_PENDING was returned and |callback| not yet run).
+  scoped_refptr<net::IOBuffer> pending_recv_buf_;
+  int pending_recv_buf_len_ = 0;
+  raw_ptr<net::IPEndPoint> pending_recv_address_ = nullptr;
+  net::CompletionOnceCallback pending_recv_callback_;
+
+  // A fake response synthesized by SendTo() before any RecvFrom() call was
+  // outstanding to deliver it to; consumed by the next RecvFrom() call.
+  std::vector<uint8_t> pending_fake_response_;
+  net::IPEndPoint pending_fake_response_from_;
+
+  base::WeakPtrFactory<NoEgressUdpSocket> weak_factory_{this};
+};
+
 webrtc::EcnMarking GetEcnMarking(net::DscpAndEcn tos) {
   switch (tos.ecn) {
     case net::ECN_NO_CHANGE:
@@ -206,9 +439,9 @@ P2PSocketUdp::P2PSocketUdp(
           net_log_with_source_.source().id,
           devtools_token)),
       socket_factory_(socket_factory),
+      is_socks5_tunnel_(is_socks5_tunnel),
       interceptor_(ThrottlingController::GetP2PInterceptor(
-          net_log_with_source_.source().id)),
-      is_socks5_tunnel_(is_socks5_tunnel) {
+          net_log_with_source_.source().id)) {
   if (interceptor_) {
     interceptor_->RegisterSocket(this);
   }
@@ -249,17 +482,39 @@ void P2PSocketUdp::Init(
 
   socket_ = socket_factory_.Run(net_log());
 
-  // If the socket is a Socks5UdpTunnel, Listen() returns ERR_IO_PENDING while
-  // the SOCKS5 UDP ASSOCIATE handshake is in progress. We register a callback
-  // and defer SocketCreated / DoRead until the handshake completes.
+  DoListen(socket_factory_, local_address, min_port, max_port, remote_address);
+}
+
+void P2PSocketUdp::DoListen(const DatagramServerSocketFactory& factory,
+                             const net::IPEndPoint& local_address,
+                             uint16_t min_port,
+                             uint16_t max_port,
+                             const P2PHostAndIPEndPoint& remote_address) {
   if (is_socks5_tunnel_) {
-    auto* tunnel = static_cast<Socks5UdpTunnel*>(socket_.get());
-    tunnel->SetListenDoneCallback(
-        base::BindOnce(&P2PSocketUdp::OnListenDone, base::Unretained(this),
-                       remote_address));
-    // Kick off async handshake; result is always ERR_IO_PENDING here.
-    std::ignore = socket_->Listen(local_address);
-    return;  // Deferred — OnListenDone() will continue.
+    // Socks5UdpTunnel::Listen() is asynchronous (it runs a real TCP connect
+    // + SOCKS5 handshake to the proxy before it can know whether the tunnel
+    // is usable) and reports completion via SetListenDoneCallback rather
+    // than its synchronous return value — see socks5_udp_tunnel.h's Listen()
+    // comment. The static_cast below is safe specifically because
+    // |is_socks5_tunnel_| is the caller's guarantee about |socket_|'s
+    // concrete type (Chromium builds with -fno-rtti, so a checked
+    // dynamic_cast isn't available here). A min/max port range is
+    // meaningless for a tunneled socket — the real local port is chosen
+    // automatically inside Socks5UdpTunnel::BindLocalUdp — so the port-range
+    // retry loop below doesn't apply and is skipped entirely.
+    static_cast<Socks5UdpTunnel*>(socket_.get())
+        ->SetListenDoneCallback(base::BindOnce(
+            &P2PSocketUdp::OnSocks5ListenDone, weak_ptr_factory_.GetWeakPtr(),
+            local_address, remote_address));
+    int result = socket_->Listen(local_address);
+    if (result == net::ERR_IO_PENDING) {
+      return;  // OnSocks5ListenDone() will call FinishInit() or OnError().
+    }
+    // Listen() only returns synchronously here on a failure that didn't
+    // need any async I/O (e.g. unexpected state); handle it the same way as
+    // the async failure path.
+    OnSocks5ListenDone(local_address, remote_address, result);
+    return;
   }
 
   int result = -1;
@@ -269,7 +524,7 @@ void P2PSocketUdp::Init(
     for (unsigned port = min_port; port <= max_port && result < 0; ++port) {
       result = socket_->Listen(net::IPEndPoint(local_address.address(), port));
       if (result < 0 && port != max_port) {
-        socket_ = socket_factory_.Run(net_log());
+        socket_ = factory.Run(net_log());
       }
     }
   } else if (local_address.port() >= min_port &&
@@ -290,10 +545,45 @@ void P2PSocketUdp::Init(
   FinishInit(remote_address);
 }
 
-void P2PSocketUdp::OnListenDone(const P2PHostAndIPEndPoint& remote_address,
-                                 int result) {
-  if (result != net::OK) {
-    LOG(ERROR) << "Socks5UdpTunnel handshake failed: " << result;
+void P2PSocketUdp::OnSocks5ListenDone(
+    const net::IPEndPoint& local_address,
+    const P2PHostAndIPEndPoint& remote_address,
+    int result) {
+  if (result == net::OK) {
+    FinishInit(remote_address);
+    return;
+  }
+  // The proxy's TCP control connection works (we got this far), but it
+  // rejected the UDP ASSOCIATE request itself — most commonly REP=0x7
+  // "command not supported", i.e. a real, working SOCKS5 proxy that simply
+  // doesn't tunnel UDP. Falling back to a real unproxied socket here would
+  // let WebRTC use it for actual ICE connectivity-check pings (STUN-format
+  // packets sent directly to whatever peer/leak-test address replies),
+  // leaking the real public IP over the network — so instead, fall back to
+  // NoEgressUdpSocket: it still binds a real local port (so a genuine "host"
+  // candidate appears in the SDP, mDNS-obfuscated like real Chrome) and
+  // fakes STUN Binding Responses (see its class comment) so a genuine srflx
+  // candidate appears too, but no real packet of any kind ever leaves this
+  // socket.
+  LOG(WARNING) << "Socks5UdpTunnel Listen() failed: " << result
+               << " (likely REP=0x7, a proxy that doesn't support UDP "
+                  "ASSOCIATE). Falling back to a no-egress local socket.";
+  // |socket_| is still the Socks5UdpTunnel whose Listen() just failed —
+  // grab the proxy IP it was configured with before replacing it, so the
+  // fallback's fake STUN responses report this machine's configured proxy
+  // address as the (fabricated) external address.
+  net::IPAddress fake_external_ip;
+  if (is_socks5_tunnel_) {
+    fake_external_ip = static_cast<Socks5UdpTunnel*>(socket_.get())
+                            ->proxy_endpoint()
+                            .address();
+  }
+  socket_ = std::make_unique<NoEgressUdpSocket>(net_log(), fake_external_ip);
+  int listen_result = socket_->Listen(local_address);
+  if (listen_result < 0) {
+    LOG(ERROR) << "NoEgressUdpSocket bind to "
+               << local_address.address().ToString() << " failed: "
+               << listen_result;
     OnError();
     return;
   }

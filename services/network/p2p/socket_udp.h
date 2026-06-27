@@ -65,6 +65,16 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) P2PSocketUdp : public P2PSocket {
   using DatagramServerSocketFactory =
       base::RepeatingCallback<std::unique_ptr<net::DatagramServerSocket>(
           net::NetLog* net_log)>;
+  // |is_socks5_tunnel|: true when |socket_factory| is guaranteed to produce a
+  // Socks5UdpTunnel (see services/network/p2p/socks5_udp_tunnel.h). Its
+  // Listen() completes asynchronously, so DoListen() needs to know to call
+  // SetListenDoneCallback() and wait, rather than treating the
+  // net::ERR_IO_PENDING it returns as an immediate bind failure. This flag is
+  // also what makes the static_cast<Socks5UdpTunnel*> in DoListen() safe
+  // without RTTI (Chromium builds with -fno-rtti, so dynamic_cast isn't
+  // available) — the caller (P2PSocketManager::CreateSocket) is the only one
+  // who knows |socket_factory|'s concrete return type, so it must vouch for
+  // it via this flag.
   P2PSocketUdp(Delegate* delegate,
                mojo::PendingRemote<mojom::P2PSocketClient> client,
                mojo::PendingReceiver<mojom::P2PSocket> socket,
@@ -112,8 +122,30 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) P2PSocketUdp : public P2PSocket {
   void OnRecv(int result);
   void MaybeDrainReceivedPackets(bool force);
 
-  // Called when Socks5UdpTunnel async handshake completes.
-  void OnListenDone(const P2PHostAndIPEndPoint& remote_address, int result);
+  // Called when Socks5UdpTunnel's async Listen() (real TCP connect + SOCKS5
+  // handshake to the proxy) completes. On failure (e.g. the proxy replied
+  // REP=0x7 "command not supported" to UDP ASSOCIATE — a real, working
+  // SOCKS5 proxy that just doesn't tunnel UDP), falls back to a
+  // NoEgressUdpSocket: it binds a real local port so a genuine "host"
+  // candidate still appears in the SDP, but unconditionally blocks every
+  // send/recv so no real packet (including ICE connectivity-check pings,
+  // which are STUN-format and not blocked by disabling STUN gathering) can
+  // ever leak the real IP over the network. See socket_udp.cc's
+  // NoEgressUdpSocket and OnSocks5ListenDone for details.
+  void OnSocks5ListenDone(const net::IPEndPoint& local_address,
+                          const P2PHostAndIPEndPoint& remote_address,
+                          int result);
+  // Binds |socket_| (already created via |factory|) to |local_address|,
+  // retrying within [min_port, max_port] on failure. Calls OnError() or
+  // FinishInit() depending on outcome. When |is_socks5_tunnel_| is set, skips
+  // the port-range retry loop (meaningless for a tunneled socket — the real
+  // local port is chosen automatically inside Socks5UdpTunnel::BindLocalUdp)
+  // and instead waits for OnSocks5ListenDone via SetListenDoneCallback.
+  void DoListen(const DatagramServerSocketFactory& factory,
+                const net::IPEndPoint& local_address,
+                uint16_t min_port,
+                uint16_t max_port,
+                const P2PHostAndIPEndPoint& remote_address);
   // Common post-Listen initialization (buffer setup, SocketCreated, DoRead).
   void FinishInit(const P2PHostAndIPEndPoint& remote_address);
 
@@ -170,13 +202,13 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) P2PSocketUdp : public P2PSocket {
   // Callback object that returns a new socket when invoked.
   DatagramServerSocketFactory socket_factory_;
 
+  // See the matching constructor parameter's comment.
+  const bool is_socks5_tunnel_ = false;
+
   raw_ptr<ThrottlingP2PNetworkInterceptor> interceptor_;
 
   // Container for batching send completions.
   std::vector<::network::P2PSendPacketMetrics> send_completions_;
-
-  // Set to true if the socket_factory_ produces a Socks5UdpTunnel.
-  bool is_socks5_tunnel_ = false;
 
   base::WeakPtrFactory<P2PSocketUdp> weak_ptr_factory_{this};
 };
