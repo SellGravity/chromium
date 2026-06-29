@@ -48,17 +48,6 @@ GeolocationPermissionContextSystem::GetPermissionStatusInternal(
   bool is_permission_content_setting = !base::FeatureList::IsEnabled(
       content_settings::features::kApproximateGeolocationPermission);
 
-  if (is_permission_content_setting) {
-    if (std::get<ContentSetting>(site_permission) != CONTENT_SETTING_ALLOW) {
-      return site_permission;
-    }
-  } else {
-    if (std::get<GeolocationSetting>(site_permission).approximate !=
-        PermissionOption::kAllowed) {
-      return site_permission;
-    }
-  }
-
   if (base::CommandLine::ForCurrentProcess()->HasSwitch("location-mode")) {
     std::string val = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("location-mode");
     std::vector<std::string> parts = base::SplitString(val, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
@@ -75,6 +64,17 @@ GeolocationPermissionContextSystem::GetPermissionStatusInternal(
                                         PermissionOption::kAllowed);
       }
       // If parts[0] == "ask", do nothing and let it fall through to site_permission
+    }
+  }
+
+  if (is_permission_content_setting) {
+    if (std::get<ContentSetting>(site_permission) != CONTENT_SETTING_ALLOW) {
+      return site_permission;
+    }
+  } else {
+    if (std::get<GeolocationSetting>(site_permission).approximate !=
+        PermissionOption::kAllowed) {
+      return site_permission;
     }
   }
 
