@@ -47,16 +47,27 @@ NavigatorBase::NavigatorBase(ExecutionContext* context)
     : NavigatorLanguage(context), ExecutionContextClient(context) {}
 
 String NavigatorBase::userAgent() const {
+  ExecutionContext* execution_context = GetExecutionContext();
+
+  if (execution_context && (execution_context->Url().ProtocolIs("devtools") || 
+                            execution_context->Url().ProtocolIs("chrome-devtools"))) {
+    return String("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36");
+  }
+
   const std::string& override_ua = SessionNoiseCache::GetInstance().GetUserAgent();
   if (!override_ua.empty()) {
     return String::FromUTF8(override_ua);
   }
-  ExecutionContext* execution_context = GetExecutionContext();
   return execution_context ? execution_context->UserAgent() : String();
 }
 
 String NavigatorBase::platform() const {
   ExecutionContext* execution_context = GetExecutionContext();
+
+  if (execution_context && (execution_context->Url().ProtocolIs("devtools") || 
+                            execution_context->Url().ProtocolIs("chrome-devtools"))) {
+    return String("Win32");
+  }
 
 #if BUILDFLAG(IS_ANDROID)
   // For user-agent reduction phase 6, Android platform should be frozen

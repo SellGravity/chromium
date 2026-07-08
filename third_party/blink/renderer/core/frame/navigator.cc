@@ -59,15 +59,15 @@ String Navigator::vendorSub() const {
 }
 
 String Navigator::platform() const {
-  // TODO(955620): Consider changing devtools overrides to only allow overriding
-  // the platform with a frozen platform to distinguish between
-  // mobile and desktop when ReduceUserAgent is enabled.
   if (!DomWindow())
     return NavigatorBase::platform();
+
   const String& platform_override =
       DomWindow()->GetFrame()->GetSettings()->GetNavigatorPlatformOverride();
-  return platform_override.empty() ? NavigatorBase::platform()
-                                   : platform_override;
+  if (!platform_override.empty()) {
+    return platform_override;
+  }
+  return NavigatorBase::platform();
 }
 
 bool Navigator::cookieEnabled() const {

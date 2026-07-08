@@ -1,5 +1,5 @@
 # Optimized Chromium Copy Script - <1GB
-$SOURCE = "C:\chromium\src\out\Release"
+$SOURCE = "F:\chromium\src\out\Release"
 $DEST = "C:\MyBrowser\browser"
 
 Write-Host "=====================================" -ForegroundColor Cyan

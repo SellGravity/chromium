@@ -6,6 +6,7 @@
 
 #include "base/compiler_specific.h"
 #include "base/task/single_thread_task_runner.h"
+#include <cstring>
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/privacy_budget/identifiability_metric_builder.h"
 #include "third_party/blink/public/common/privacy_budget/identifiability_study_settings.h"
@@ -63,6 +64,156 @@ void MaybeRecordMetric(bool record_identifiability,
   }
   MaybeRecordMetric(record_identifiability, hint, token_builder.GetToken(),
                     execution_context);
+}
+
+// ---------------------------------------------------------------------------
+// UA string parsing helpers for SyncWithUserAgent()
+// ---------------------------------------------------------------------------
+
+// Extract Chrome major version from UA string, e.g.
+// "...Chrome/120.0.6099.71 Safari/537.36" -> "120"
+static std::string ExtractChromeMajorVersion(const std::string& ua) {
+  const char* kKey = "Chrome/";
+  auto pos = ua.find(kKey);
+  if (pos == std::string::npos)
+    return "";
+  pos += strlen(kKey);
+  auto dot = ua.find('.', pos);
+  if (dot == std::string::npos)
+    return ua.substr(pos);
+  return ua.substr(pos, dot - pos);
+}
+
+
+static UserAgentBrandList GetConfiguredBrandsFor(const String& full_ua) {
+  std::string ua = full_ua.Utf8();
+  std::string major = ExtractChromeMajorVersion(ua);
+  UserAgentBrandList brands;
+  // Greased brand to prevent sniffing
+  brands.push_back({"Not/A)Brand", "8"});
+  brands.push_back({"Chromium", major});
+  brands.push_back({"Google Chrome", major});
+  return brands;
+}
+
+// Returns platform name, e.g. "Windows", "macOS", "Linux", "Android"
+static String GetConfiguredPlatformFor(const String& full_ua) {
+  std::string ua = full_ua.Utf8();
+  if (ua.find("Android") != std::string::npos)
+    return "Android";
+  if (ua.find("iPhone") != std::string::npos ||
+      ua.find("iPad") != std::string::npos)
+    return "iOS";
+  if (ua.find("Windows") != std::string::npos)
+    return "Windows";
+  if (ua.find("Macintosh") != std::string::npos ||
+      ua.find("Mac OS X") != std::string::npos)
+    return "macOS";
+  if (ua.find("Linux") != std::string::npos ||
+      ua.find("X11") != std::string::npos)
+    return "Linux";
+  if (ua.find("CrOS") != std::string::npos)
+    return "Chrome OS";
+  return "";
+}
+
+// Returns platform version, e.g. "10.0.0" for Windows 10
+static String GetConfiguredPlatformVersionFor(const String& full_ua) {
+  std::string ua = full_ua.Utf8();
+  // Windows NT x.y
+  auto pos = ua.find("Windows NT ");
+  if (pos != std::string::npos) {
+    pos += strlen("Windows NT ");
+    auto end = ua.find_first_of(";)", pos);
+    if (end == std::string::npos)
+      end = ua.size();
+    std::string nt_ver = ua.substr(pos, end - pos);
+    // Map NT version to Windows marketing version as a simple passthrough
+    // (clients interpret this; "10.0.0" is standard for Win10/11)
+    return String::FromUTF8(nt_ver + ".0");
+  }
+  // Android x.y
+  pos = ua.find("Android ");
+  if (pos != std::string::npos) {
+    pos += strlen("Android ");
+    auto end = ua.find_first_of(";)", pos);
+    if (end == std::string::npos)
+      end = ua.size();
+    return String::FromUTF8(ua.substr(pos, end - pos));
+  }
+  // Mac OS X x_y_z
+  pos = ua.find("Mac OS X ");
+  if (pos != std::string::npos) {
+    pos += strlen("Mac OS X ");
+    auto end = ua.find_first_of(")", pos);
+    if (end == std::string::npos)
+      end = ua.size();
+    std::string ver = ua.substr(pos, end - pos);
+    for (char& c : ver)
+      if (c == '_') c = '.';
+    return String::FromUTF8(ver);
+  }
+  return "";
+}
+
+static bool IsUserAgentMobile(const String& full_ua) {
+  std::string ua = full_ua.Utf8();
+  return ua.find("Mobile") != std::string::npos;
+}
+
+static String GetConfiguredArchitectureFor(const String& full_ua) {
+  std::string ua = full_ua.Utf8();
+  if (ua.find("arm") != std::string::npos ||
+      ua.find("ARM") != std::string::npos ||
+      ua.find("aarch64") != std::string::npos)
+    return "arm";
+  if (ua.find("x86_64") != std::string::npos ||
+      ua.find("Win64") != std::string::npos ||
+      ua.find("WOW64") != std::string::npos ||
+      ua.find("x64") != std::string::npos)
+    return "x86";
+  return "x86";
+}
+
+static String GetConfiguredBitnessFor(const String& full_ua) {
+  if (IsUserAgentMobile(full_ua))
+    return " ";  // Mobile is always 32-bit for UAData
+  std::string ua = full_ua.Utf8();
+  if (ua.find("Win64") != std::string::npos ||
+      ua.find("WOW64") != std::string::npos ||
+      ua.find("x86_64") != std::string::npos ||
+      ua.find("x64") != std::string::npos ||
+      ua.find("aarch64") != std::string::npos)
+    return "64";
+  return "32";
+}
+
+// Model is only relevant for mobile; empty on desktop
+static String GetConfiguredModelFor(const String& full_ua) {
+  // Android model: "...Android 13; Pixel 7 Build/..." -> "Pixel 7"
+  std::string ua = full_ua.Utf8();
+  auto start = ua.find("Android ");
+  if (start != std::string::npos) {
+    auto semi = ua.find(';', start);
+    if (semi != std::string::npos) {
+      auto model_start = semi + 2;
+      auto model_end = ua.find_first_of(";)", model_start);
+      if (model_end == std::string::npos)
+        model_end = ua.size();
+      // Strip "Build/..." suffix if present
+      auto build = ua.find(" Build/", model_start);
+      if (build != std::string::npos && build < model_end)
+        model_end = build;
+      if (model_end > model_start)
+        return String::FromUTF8(ua.substr(model_start, model_end - model_start));
+    }
+  }
+  return "";
+}
+
+static bool IsUserAgentWoW64(const String& full_ua) {
+  std::string ua = full_ua.Utf8();
+  return ua.find("WOW64") != std::string::npos;
 }
 
 }  // namespace
@@ -139,7 +290,16 @@ void NavigatorUAData::SetWoW64(bool wow64) {
 void NavigatorUAData::SetFormFactors(Vector<String> form_factors) {
   form_factors_ = std::move(form_factors);
 }
-
+void NavigatorUAData::SyncWithUserAgent(const String& full_user_agent) {
+  SetBrandVersionList(GetConfiguredBrandsFor(full_user_agent));
+  SetPlatform(GetConfiguredPlatformFor(full_user_agent),
+              GetConfiguredPlatformVersionFor(full_user_agent));
+  SetMobile(IsUserAgentMobile(full_user_agent));
+  SetArchitecture(GetConfiguredArchitectureFor(full_user_agent));
+  SetBitness(GetConfiguredBitnessFor(full_user_agent));
+  SetModel(GetConfiguredModelFor(full_user_agent));
+  SetWoW64(IsUserAgentWoW64(full_user_agent));
+}
 bool NavigatorUAData::mobile() const {
   if (GetExecutionContext()) {
     return is_mobile_;

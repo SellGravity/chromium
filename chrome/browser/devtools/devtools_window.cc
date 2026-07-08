@@ -2010,6 +2010,32 @@ WebContents* DevToolsWindow::GetInspectedWebContents() {
 void DevToolsWindow::LoadCompleted() {
   Show(action_on_load_);
   action_on_load_ = DevToolsToggleAction::NoOp();
+
+  if (IsAutoOpenedInPhoneMode(GetInspectedWebContents())) {
+    main_web_contents_->GetPrimaryMainFrame()->ExecuteJavaScript(
+        u"document.body.style.visibility = 'hidden';"
+        u"setTimeout(() => {"
+        u"  try {"
+        u"    const action = globalThis.UI.ActionRegistry.ActionRegistry.instance().getAction('emulation.toggle-device-mode');"
+        u"    if (action && !action.toggled()) action.execute();"
+        u"  } catch (e) {"
+        u"    if (!window.Emulation || !window.Emulation.AdvancedApp || !window.Emulation.AdvancedApp.instance().rootSplitWidget) {"
+        u"      document.dispatchEvent(new KeyboardEvent('keydown', {key: 'm', code: 'KeyM', ctrlKey: true, shiftKey: true, bubbles: true}));"
+        u"    }"
+        u"  }"
+        u"  setTimeout(() => {"
+        u"    if (window.Emulation && window.Emulation.AdvancedApp) {"
+        u"      const app = window.Emulation.AdvancedApp.instance();"
+        u"      if (app && app.rootSplitWidget && app.rootSplitWidget.showMode() === 'Both') {"
+        u"        app.rootSplitWidget.hideSidebar();"
+        u"      }"
+        u"    }"
+        u"    document.body.style.visibility = 'visible';"
+        u"  }, 300);"
+        u"}, 100);",
+        base::DoNothing());
+  }
+
   if (!load_completed_callback_.is_null()) {
     std::move(load_completed_callback_).Run();
   }
