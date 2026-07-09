@@ -453,6 +453,29 @@ TEST_F(UserAgentUtilsTest, CustomUserAgent) {
   }
 }
 
+TEST_F(UserAgentUtilsTest, CustomUserAgentLeakTest) {
+  std::string spoofed_ua = "Mozilla/5.0 (Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  base::test::ScopedCommandLine scoped_command_line;
+  base::CommandLine* command_line = scoped_command_line.GetProcessCommandLine();
+  command_line->AppendSwitchASCII(kUserAgent, spoofed_ua);
+  
+  auto metadata = GetUserAgentMetadata();
+  // We expect the platform to be macOS and platform_version to be ""
+  EXPECT_EQ(metadata.platform, "macOS");
+  EXPECT_EQ(metadata.platform_version, "");
+  EXPECT_EQ(metadata.architecture, "");
+  
+  // Also test Android
+  std::string spoofed_android = "Mozilla/5.0 (Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  base::test::ScopedCommandLine scoped_command_line_android;
+  base::CommandLine* command_line_android = scoped_command_line_android.GetProcessCommandLine();
+  command_line_android->AppendSwitchASCII(kUserAgent, spoofed_android);
+  
+  auto metadata_android = GetUserAgentMetadata();
+  EXPECT_EQ(metadata_android.platform, "Linux");
+  EXPECT_EQ(metadata_android.model, "");
+}
+
 TEST_F(UserAgentUtilsTest, InvalidCustomUserAgent) {
   std::string custom_user_agent = "custom \rchrome user agent";
   base::test::ScopedCommandLine scoped_command_line;

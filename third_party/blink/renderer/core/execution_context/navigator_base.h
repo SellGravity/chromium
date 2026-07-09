@@ -59,6 +59,7 @@ class CORE_EXPORT NavigatorBase : public ScriptWrappable,
  protected:
   ExecutionContext* GetUAExecutionContext() const override;
   UserAgentMetadata GetUserAgentMetadata() const override;
+  String GetUserAgent() const override;
 };
 
 }  // namespace blink

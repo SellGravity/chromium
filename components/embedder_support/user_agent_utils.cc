@@ -704,37 +704,52 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
   // ═══ LOW ENTROPY CLIENT HINTS ═══
 
   // brands (e.g., "Chromium 143", "Google Chrome 143", "Not.A/Brand 24")
-  if (has_custom_ua && !parsed_major_version.empty()) {
-    int major_ver_int;
-    base::StringToInt(parsed_major_version, &major_ver_int);
-    // Force "Google Chrome" brand regardless of build branding
-    // Real Chrome always includes this; Chromium builds don't by default
-    metadata.brand_version_list = GenerateBrandVersionList(
-        major_ver_int, "Google Chrome", parsed_major_version,
-        blink::UserAgentBrandVersionType::kMajorVersion, std::nullopt);
+  if (has_custom_ua) {
+    if (!parsed_major_version.empty()) {
+      int major_ver_int = 0;
+      base::StringToInt(parsed_major_version, &major_ver_int);
+      if (major_ver_int < 0) major_ver_int = 0; // Fix: Prevent DCHECK failure on negative version numbers
+      // Force "Google Chrome" brand regardless of build branding
+      // Real Chrome always includes this; Chromium builds don't by default
+      metadata.brand_version_list = GenerateBrandVersionList(
+          major_ver_int, "Google Chrome", parsed_major_version,
+          blink::UserAgentBrandVersionType::kMajorVersion, std::nullopt);
+    } else {
+      metadata.brand_version_list = GenerateBrandVersionList(
+          0, "Google Chrome", "0",
+          blink::UserAgentBrandVersionType::kMajorVersion, std::nullopt);
+    }
   } else {
     metadata.brand_version_list =
         GetUserAgentBrandMajorVersionListInternal(std::nullopt);
   }
 
-  metadata.mobile = GetMobileBitForUAMetadata();
-
   // platform (e.g., "Windows", "macOS", "Linux")
   if (has_custom_ua) {
     if (custom_ua.find("Windows NT") != std::string::npos) {
       metadata.platform = "Windows";
+      metadata.mobile = false;
     } else if (custom_ua.find("Macintosh") != std::string::npos) {
       metadata.platform = "macOS";
+      metadata.mobile = false;
     } else if (custom_ua.find("Android") != std::string::npos) {
       metadata.platform = "Android";
+      metadata.mobile = custom_ua.find("Mobile") != std::string::npos;
+    } else if (custom_ua.find("iPhone") != std::string::npos || custom_ua.find("iPad") != std::string::npos) {
+      metadata.platform = "iOS";
+      metadata.mobile = custom_ua.find("Mobile") != std::string::npos || custom_ua.find("iPhone") != std::string::npos;
     } else if (custom_ua.find("CrOS") != std::string::npos) {
       metadata.platform = "Chrome OS";
+      metadata.mobile = custom_ua.find("Mobile") != std::string::npos;
     } else if (custom_ua.find("Linux") != std::string::npos) {
       metadata.platform = "Linux";
+      metadata.mobile = custom_ua.find("Mobile") != std::string::npos;
     } else {
-      metadata.platform = GetPlatformForUAMetadata();
+      metadata.platform = "Unknown";
+      metadata.mobile = custom_ua.find("Mobile") != std::string::npos;
     }
   } else {
+    metadata.mobile = GetMobileBitForUAMetadata();
     metadata.platform = GetPlatformForUAMetadata();
   }
 
@@ -745,13 +760,21 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
   // ═══ HIGH ENTROPY CLIENT HINTS ═══
 
   // brand_full_version_list + full_version
-  if (has_custom_ua && !parsed_full_version.empty()) {
-    int major_ver_int;
-    base::StringToInt(parsed_major_version, &major_ver_int);
-    metadata.brand_full_version_list = GenerateBrandVersionList(
-        major_ver_int, "Google Chrome", parsed_full_version,
-        blink::UserAgentBrandVersionType::kFullVersion, std::nullopt);
-    metadata.full_version = parsed_full_version;
+  if (has_custom_ua) {
+    if (!parsed_full_version.empty()) {
+      int major_ver_int = 0;
+      base::StringToInt(parsed_major_version, &major_ver_int);
+      if (major_ver_int < 0) major_ver_int = 0; // Fix: Prevent DCHECK failure on negative version numbers
+      metadata.brand_full_version_list = GenerateBrandVersionList(
+          major_ver_int, "Google Chrome", parsed_full_version,
+          blink::UserAgentBrandVersionType::kFullVersion, std::nullopt);
+      metadata.full_version = parsed_full_version;
+    } else {
+      metadata.brand_full_version_list = GenerateBrandVersionList(
+          0, "Google Chrome", "0.0.0.0",
+          blink::UserAgentBrandVersionType::kFullVersion, std::nullopt);
+      metadata.full_version = "";
+    }
   } else {
     metadata.brand_full_version_list =
         GetUserAgentBrandFullVersionListInternal(std::nullopt);
@@ -760,62 +783,22 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
 
   // architecture, bitness, wow64
   if (has_custom_ua) {
-    if (custom_ua.find("WOW64") != std::string::npos) {
-      metadata.architecture = "x86";
-      metadata.bitness = "64";
-      metadata.wow64 = true;
-    } else if (custom_ua.find("Win64; x64") != std::string::npos ||
-               custom_ua.find("x86_64") != std::string::npos) {
-      metadata.architecture = "x86";
-      metadata.bitness = "64";
-      metadata.wow64 = false;
-    } else if (custom_ua.find("ARM64") != std::string::npos ||
-               custom_ua.find("aarch64") != std::string::npos) {
-      metadata.architecture = "arm";
-      metadata.bitness = "64";
-      metadata.wow64 = false;
-    } else if (custom_ua.find("Windows NT") != std::string::npos) {
-      // Windows without specific arch → default x86/64
-      metadata.architecture = "x86";
-      metadata.bitness = "64";
-      metadata.wow64 = false;
-    } else if (custom_ua.find("Macintosh") != std::string::npos) {
-      metadata.architecture = "x86";
-      metadata.bitness = "64";
-      metadata.wow64 = false;
-    } else {
-      metadata.architecture = GetCpuArchitecture();
-      metadata.bitness = GetCpuBitness();
-      metadata.wow64 = IsWoW64();
-    }
+    metadata.architecture = "";
+    metadata.bitness = "";
+    metadata.wow64 = false;
+    metadata.model = "";
   } else {
     metadata.architecture = GetCpuArchitecture();
     metadata.bitness = GetCpuBitness();
     metadata.wow64 = IsWoW64();
+    metadata.model = BuildModelInfo();
   }
 
-  metadata.model = BuildModelInfo();
   metadata.form_factors = GetFormFactorsClientHint(metadata, metadata.mobile);
 
   // platform_version
   if (has_custom_ua) {
-    size_t nt_pos = custom_ua.find("Windows NT ");
-    if (nt_pos != std::string::npos) {
-      std::string nt_ver = custom_ua.substr(nt_pos + 11, 4);
-      if (nt_ver.find("10.0") == 0) {
-        metadata.platform_version = "10.0.0";
-      } else if (nt_ver.find("6.3") == 0) {
-        metadata.platform_version = "6.3.0";
-      } else if (nt_ver.find("6.2") == 0) {
-        metadata.platform_version = "6.2.0";
-      } else if (nt_ver.find("6.1") == 0) {
-        metadata.platform_version = "3.0.0";
-      } else {
-        metadata.platform_version = GetPlatformVersion();
-      }
-    } else {
-      metadata.platform_version = GetPlatformVersion();
-    }
+    metadata.platform_version = "";
   } else {
     metadata.platform_version = GetPlatformVersion();
   }
@@ -831,7 +814,10 @@ std::vector<std::string> GetFormFactorsClientHint(
       is_mobile ? blink::kMobileFormFactor : blink::kDesktopFormFactor};
 
 #if BUILDFLAG(IS_ANDROID)
-  if (ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_XR) {
+  base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+  bool has_custom_ua = cmd && cmd->HasSwitch(kUserAgent) &&
+                       net::HttpUtil::IsValidHeaderValue(cmd->GetSwitchValueASCII(kUserAgent));
+  if (!has_custom_ua && ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_XR) {
     form_factors.push_back(blink::kXRFormFactor);
   }
 #endif  // BUILDFLAG(IS_ANDROID)

@@ -25,7 +25,7 @@ namespace {
 
 String GetReducedNavigatorPlatform() {
 #if BUILDFLAG(IS_ANDROID)
-  return "Linux armv81";
+  return "Linux armv8l";
 #elif BUILDFLAG(IS_MAC)
   return "MacIntel";
 #elif BUILDFLAG(IS_WIN)
@@ -48,25 +48,32 @@ NavigatorBase::NavigatorBase(ExecutionContext* context)
 
 String NavigatorBase::userAgent() const {
   ExecutionContext* execution_context = GetExecutionContext();
-
-  if (execution_context && (execution_context->Url().ProtocolIs("devtools") || 
-                            execution_context->Url().ProtocolIs("chrome-devtools"))) {
-    return String("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36");
+  // SessionNoiseCache (antidetect spoofed UA) always takes priority
+  const std::string& noise_ua = SessionNoiseCache::GetInstance().GetUserAgent();
+  if (!noise_ua.empty()) {
+    return String::FromUTF8(noise_ua);
   }
-
-  const std::string& override_ua = SessionNoiseCache::GetInstance().GetUserAgent();
-  if (!override_ua.empty()) {
-    return String::FromUTF8(override_ua);
+  // Fall back to DevTools probe override (only if no antidetect UA is set)
+  if (execution_context) {
+    String probe_ua;
+    probe::ApplyUserAgentOverride(probe::ToCoreProbeSink(execution_context), &probe_ua);
+    if (!probe_ua.empty()) {
+      return probe_ua;
+    }
   }
   return execution_context ? execution_context->UserAgent() : String();
 }
 
 String NavigatorBase::platform() const {
   ExecutionContext* execution_context = GetExecutionContext();
-
-  if (execution_context && (execution_context->Url().ProtocolIs("devtools") || 
-                            execution_context->Url().ProtocolIs("chrome-devtools"))) {
-    return String("Win32");
+  String ua_str = this->userAgent();
+  if (!ua_str.empty()) {
+    if (ua_str.Contains("Android")) return "Linux armv8l";
+    if (ua_str.Contains("iPhone") || ua_str.Contains("iPad")) return "iPhone";
+    if (ua_str.Contains("Windows")) return "Win32";
+    if (ua_str.Contains("Macintosh") || ua_str.Contains("Mac OS X")) return "MacIntel";
+    if (ua_str.Contains("CrOS")) return "Chrome OS";
+    if (ua_str.Contains("Linux") || ua_str.Contains("X11")) return "Linux x86_64";
   }
 
 #if BUILDFLAG(IS_ANDROID)
@@ -112,6 +119,10 @@ UserAgentMetadata NavigatorBase::GetUserAgentMetadata() const {
   ExecutionContext* execution_context = GetExecutionContext();
   return execution_context ? execution_context->GetUserAgentMetadata()
                            : blink::UserAgentMetadata();
+}
+
+String NavigatorBase::GetUserAgent() const {
+  return userAgent();
 }
 
 }  // namespace blink

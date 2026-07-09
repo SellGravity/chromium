@@ -2012,27 +2012,60 @@ void DevToolsWindow::LoadCompleted() {
   action_on_load_ = DevToolsToggleAction::NoOp();
 
   if (IsAutoOpenedInPhoneMode(GetInspectedWebContents())) {
+    // Inject an overlay div matching DevTools background color to prevent
+    // any flash. The overlay covers the window while device mode initializes,
+    // then is removed cleanly when everything is set up.
     main_web_contents_->GetPrimaryMainFrame()->ExecuteJavaScript(
-        u"document.body.style.visibility = 'hidden';"
-        u"setTimeout(() => {"
-        u"  try {"
-        u"    const action = globalThis.UI.ActionRegistry.ActionRegistry.instance().getAction('emulation.toggle-device-mode');"
-        u"    if (action && !action.toggled()) action.execute();"
-        u"  } catch (e) {"
-        u"    if (!window.Emulation || !window.Emulation.AdvancedApp || !window.Emulation.AdvancedApp.instance().rootSplitWidget) {"
-        u"      document.dispatchEvent(new KeyboardEvent('keydown', {key: 'm', code: 'KeyM', ctrlKey: true, shiftKey: true, bubbles: true}));"
-        u"    }"
+        // Create a full-screen overlay with DevTools dark background color
+        u"(function() {"
+        u"  const overlay = document.createElement('div');"
+        u"  overlay.id = '__phone_mode_overlay__';"
+        u"  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;"
+        u"background:#202124;pointer-events:none;';"
+        u"  document.documentElement.appendChild(overlay);"
+        // Retry loop: wait for DevTools ActionRegistry to be ready
+        u"  let attempts = 40;"
+        u"  function tryActivate() {"
+        u"    const registry = globalThis.UI?.ActionRegistry?.ActionRegistry?.instance?.();"
+        u"    if (!registry && --attempts > 0) return setTimeout(tryActivate, 50);"
+        u"    try {"
+        u"      const action = registry?.getAction('emulation.toggle-device-mode');"
+        u"      if (action && !action.toggled()) action.execute();"
+        u"    } catch(e) {}"
+        // After device mode activates, hide the sidebar and enable touch emulation
+        u"    setTimeout(function() {"
+        u"      try {"
+        u"        const app = globalThis.Emulation?.AdvancedApp?.instance?.();"
+        u"        if (app?.rootSplitWidget?.showMode() === 'Both') {"
+        u"          app.rootSplitWidget.hideSidebar();"
+        u"        }"
+        u"      } catch(e) {}"
+        // Enable touch emulation with 5 touch points (standard for mobile)
+        u"      try {"
+        u"        const targets = globalThis.SDK?.TargetManager?.TargetManager?.instance?.()?.targets?.() ?? [];"
+        u"        for (const t of targets) {"
+        u"          const em = t.model(globalThis.SDK?.EmulationModel?.EmulationModel);"
+        u"          if (em) {"
+        u"            em.emulateTouch(true, 5);"
+        u"            break;"
+        u"          }"
+        u"        }"
+        u"      } catch(e) {}"
+        // Reset DevTools UA override so HTTP header uses browser UA (SessionNoiseCache)
+        // not the last selected device's UA (e.g. iPhone from previous session)
+        u"      try {"
+        u"        const mnm = globalThis.SDK?.NetworkManager?.MultitargetNetworkManager?.instance?.();"
+        u"        if (mnm && typeof mnm.setUserAgentOverride === 'function') {"
+        u"          mnm.setUserAgentOverride('', null);"
+        u"        }"
+        u"      } catch(e) {}"
+        // Remove overlay: device mode is now set up cleanly
+        u"      const el = document.getElementById('__phone_mode_overlay__');"
+        u"      if (el) el.remove();"
+        u"    }, 250);"
         u"  }"
-        u"  setTimeout(() => {"
-        u"    if (window.Emulation && window.Emulation.AdvancedApp) {"
-        u"      const app = window.Emulation.AdvancedApp.instance();"
-        u"      if (app && app.rootSplitWidget && app.rootSplitWidget.showMode() === 'Both') {"
-        u"        app.rootSplitWidget.hideSidebar();"
-        u"      }"
-        u"    }"
-        u"    document.body.style.visibility = 'visible';"
-        u"  }, 300);"
-        u"}, 100);",
+        u"  tryActivate();"
+        u"})();",
         base::DoNothing());
   }
 
@@ -2040,6 +2073,8 @@ void DevToolsWindow::LoadCompleted() {
     std::move(load_completed_callback_).Run();
   }
 }
+
+
 
 void DevToolsWindow::SetLoadCompletedCallback(base::OnceClosure closure) {
   if (life_stage_ == kLoadCompleted || life_stage_ == kClosing) {

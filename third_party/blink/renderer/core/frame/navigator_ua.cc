@@ -34,6 +34,7 @@ NavigatorUAData* NavigatorUA::userAgentData() {
   }
   ua_data->SetFormFactors(std::move(form_factors));
 
+
   return ua_data;
 }
 

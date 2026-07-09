@@ -29,7 +29,7 @@ class NavigatorUAData : public ScriptWrappable, ExecutionContextClient {
 
   explicit NavigatorUAData(ExecutionContext* context);
 
- void SyncWithUserAgent(const String& full_user_agent);
+
 
   void SetBrandVersionList(const UserAgentBrandList& brand_version_list);
   void SetFullVersionList(const UserAgentBrandList& full_version_list);
