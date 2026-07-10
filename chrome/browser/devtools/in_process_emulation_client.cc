@@ -117,6 +117,11 @@ void InProcessEmulationClient::ApplyEmulation() {
     user_agent = command_line->GetSwitchValueASCII("user-agent");
   }
 
+  if (mobile && user_agent.find("Mobile Safari") == std::string::npos && user_agent.find("Safari/") != std::string::npos) {
+    size_t safari_pos = user_agent.find("Safari/");
+    user_agent.insert(safari_pos, "Mobile ");
+  }
+
   std::string platform_name = "iPhone";
   std::string platform_os = "iOS";
   std::string platform_version = "16.6.0";

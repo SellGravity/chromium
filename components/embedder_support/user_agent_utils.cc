@@ -485,6 +485,14 @@ std::optional<std::string> GetUserAgentFromCommandLine() {
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
   if (command_line->HasSwitch(kUserAgent)) {
     std::string ua = command_line->GetSwitchValueASCII(kUserAgent);
+
+    if (command_line->HasSwitch("device-size") && 
+        ua.find("Mobile Safari") == std::string::npos && 
+        ua.find("Safari/") != std::string::npos) {
+      size_t safari_pos = ua.find("Safari/");
+      ua.insert(safari_pos, "Mobile ");
+    }
+
     if (net::HttpUtil::IsValidHeaderValue(ua)) {
       return ua;
     }
@@ -736,7 +744,7 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
       metadata.mobile = false;
     } else if (custom_ua.find("Android") != std::string::npos) {
       metadata.platform = "Android";
-      metadata.mobile = custom_ua.find("Mobile") != std::string::npos;
+      metadata.mobile = custom_ua.find("Mobile") != std::string::npos || (cmd && cmd->HasSwitch("device-size"));
     } else if (custom_ua.find("iPhone") != std::string::npos || custom_ua.find("iPad") != std::string::npos) {
       metadata.platform = "iOS";
       metadata.mobile = custom_ua.find("Mobile") != std::string::npos || custom_ua.find("iPhone") != std::string::npos;
@@ -792,6 +800,22 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
     metadata.bitness = "";
     metadata.wow64 = false;
     metadata.model = "";
+    if (custom_ua.find("Android") != std::string::npos) {
+      size_t android_pos = custom_ua.find("Android ");
+      if (android_pos != std::string::npos) {
+        size_t end_pos = custom_ua.find(";", android_pos);
+        if (end_pos != std::string::npos) {
+          size_t end_bracket = custom_ua.find(")", end_pos);
+          if (end_bracket != std::string::npos) {
+            std::string model = custom_ua.substr(end_pos + 1, end_bracket - (end_pos + 1));
+            if (!model.empty() && model[0] == ' ') model = model.substr(1);
+            size_t build_pos = model.find(" Build/");
+            if (build_pos != std::string::npos) model = model.substr(0, build_pos);
+            metadata.model = model;
+          }
+        }
+      }
+    }
   } else {
     metadata.architecture = GetCpuArchitecture();
     metadata.bitness = GetCpuBitness();
