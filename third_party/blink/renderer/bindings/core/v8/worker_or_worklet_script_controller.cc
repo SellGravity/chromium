@@ -297,6 +297,22 @@ void WorkerOrWorkletScriptController::PrepareForEvaluation() {
   // Inform V8 that origin trial information is now connected with the context,
   // and V8 can extend the context with origin trial features.
   isolate_->InstallConditionalFeatures(script_state_->GetContext());
+
+  String ua = global_scope_->UserAgent();
+  if (ua.Contains("iPhone") || ua.Contains("iPad") || ua.Contains("iPod")) {
+    v8::Local<v8::Context> context = script_state_->GetContext();
+    v8::Local<v8::Object> global = context->Global();
+    v8::Local<v8::Value> navigator_val;
+    if (global->Get(context, V8String(isolate_, "WorkerNavigator")).ToLocal(&navigator_val) && navigator_val->IsFunction()) {
+      v8::Local<v8::Object> navigator_func = navigator_val.As<v8::Object>();
+      v8::Local<v8::Value> proto_val;
+      if (navigator_func->Get(context, V8String(isolate_, "prototype")).ToLocal(&proto_val) && proto_val->IsObject()) {
+        v8::Local<v8::Object> proto = proto_val.As<v8::Object>();
+        proto->Delete(context, V8String(isolate_, "userAgentData")).FromMaybe(false);
+      }
+    }
+  }
+
   ExtensionsRegistry::GetInstance().InstallExtensions(script_state_);
 }
 

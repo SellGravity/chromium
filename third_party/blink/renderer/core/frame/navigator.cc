@@ -47,6 +47,10 @@ String Navigator::productSub() const {
 }
 
 String Navigator::vendor() const {
+  String ua = userAgent();
+  if (ua.Contains("iPhone") || ua.Contains("iPad") || ua.Contains("iPod")) {
+    return "Apple Computer, Inc.";
+  }
   // Do not change without good cause. History:
   // https://code.google.com/p/chromium/issues/detail?id=276813
   // https://www.w3.org/Bugs/Public/show_bug.cgi?id=27786

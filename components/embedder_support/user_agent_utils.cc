@@ -705,7 +705,9 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
 
   // brands (e.g., "Chromium 143", "Google Chrome 143", "Not.A/Brand 24")
   if (has_custom_ua) {
-    if (!parsed_major_version.empty()) {
+    if (custom_ua.find("iPhone") != std::string::npos || custom_ua.find("iPad") != std::string::npos || custom_ua.find("iPod") != std::string::npos) {
+      metadata.brand_version_list.clear();
+    } else if (!parsed_major_version.empty()) {
       int major_ver_int = 0;
       base::StringToInt(parsed_major_version, &major_ver_int);
       if (major_ver_int < 0) major_ver_int = 0; // Fix: Prevent DCHECK failure on negative version numbers
@@ -761,7 +763,10 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
 
   // brand_full_version_list + full_version
   if (has_custom_ua) {
-    if (!parsed_full_version.empty()) {
+    if (custom_ua.find("iPhone") != std::string::npos || custom_ua.find("iPad") != std::string::npos || custom_ua.find("iPod") != std::string::npos) {
+      metadata.brand_full_version_list.clear();
+      metadata.full_version = "";
+    } else if (!parsed_full_version.empty()) {
       int major_ver_int = 0;
       base::StringToInt(parsed_major_version, &major_ver_int);
       if (major_ver_int < 0) major_ver_int = 0; // Fix: Prevent DCHECK failure on negative version numbers
@@ -796,9 +801,50 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
 
   metadata.form_factors = GetFormFactorsClientHint(metadata, metadata.mobile);
 
-  // platform_version
+  // platform_version: parse from UA string (real devices expose this)
   if (has_custom_ua) {
-    metadata.platform_version = "";
+    if (custom_ua.find("iPhone") != std::string::npos || custom_ua.find("iPad") != std::string::npos || custom_ua.find("iPod") != std::string::npos) {
+      metadata.platform_version = "";
+    } else {
+      // Android: "Android 13;" → "13.0.0"
+      size_t android_pos = custom_ua.find("Android ");
+      size_t win_pos = custom_ua.find("Windows NT ");
+      size_t mac_pos = custom_ua.find("Mac OS X ");
+      if (android_pos != std::string::npos) {
+        size_t ver_start = android_pos + 8;
+        size_t semi = custom_ua.find(';', ver_start);
+        size_t paren = custom_ua.find(')', ver_start);
+        size_t ver_end = std::min(semi, paren);
+        if (ver_end != std::string::npos) {
+          metadata.platform_version = custom_ua.substr(ver_start, ver_end - ver_start) + ".0.0";
+        } else {
+          metadata.platform_version = "10.0.0";
+        }
+      } else if (win_pos != std::string::npos) {
+        // Windows NT 10.0 → "10.0.0"
+        std::string nt_ver = custom_ua.substr(win_pos + 11, 4);
+        if (nt_ver.substr(0, 4) == "10.0") metadata.platform_version = "10.0.0";
+        else if (nt_ver.substr(0, 3) == "6.3") metadata.platform_version = "6.3.0";
+        else if (nt_ver.substr(0, 3) == "6.2") metadata.platform_version = "6.2.0";
+        else if (nt_ver.substr(0, 3) == "6.1") metadata.platform_version = "3.0.0";
+        else metadata.platform_version = nt_ver + ".0";
+      } else if (mac_pos != std::string::npos) {
+        // Mac OS X 10_15_7 → "10.15.7"
+        size_t ver_start = mac_pos + 9;
+        size_t semi = custom_ua.find(';', ver_start);
+        size_t paren = custom_ua.find(')', ver_start);
+        size_t ver_end = std::min(semi, paren);
+        if (ver_end != std::string::npos) {
+          std::string mac_ver = custom_ua.substr(ver_start, ver_end - ver_start);
+          base::ReplaceChars(mac_ver, "_", ".", &mac_ver);
+          metadata.platform_version = mac_ver;
+        } else {
+          metadata.platform_version = "10.15.7";
+        }
+      } else {
+        metadata.platform_version = "";
+      }
+    }
   } else {
     metadata.platform_version = GetPlatformVersion();
   }

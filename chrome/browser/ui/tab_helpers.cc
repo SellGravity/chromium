@@ -161,6 +161,9 @@
 #include "third_party/blink/public/common/features.h"
 #include "ui/accessibility/accessibility_features.h"
 
+#include "chrome/browser/devtools/in_process_emulation_client.h"
+#include "base/command_line.h"
+
 #if BUILDFLAG(IS_ANDROID)
 #include "base/android/android_info.h"
 #include "base/functional/bind.h"
@@ -321,6 +324,16 @@ void TabHelpers::AttachTabHelpers(WebContents* web_contents) {
                             std::make_unique<base::SupportsUserData::Data>());
 
   // Create all the tab helpers.
+
+  // Initialize InProcessEmulationClient for phone emulation.
+  // We only want to attach this to actual browser tabs, not DevTools windows themselves.
+  if (base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("device-mode") == "phone") {
+    // A simple heuristic: DevTools WebContents usually have a completely different
+    // delegate or are not added to tab strip. But since we are inside AttachTabHelpers,
+    // this is called for all normal tabs. We can just attach it.
+    // If it's a devtools window, it might also get it, but it doesn't matter much.
+    InProcessEmulationClient::CreateForWebContents(web_contents);
+  }
 
   // SessionTabHelper comes first because it sets up the tab ID, and other
   // helpers may rely on that.

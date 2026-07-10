@@ -237,7 +237,7 @@ ScriptPromise<UADataValues> NavigatorUAData::getHighEntropyValues(
 
   // Use `brands()` and not `brand_set_` directly since the former also
   // records IdentifiabilityStudy metrics.
-  values->setBrands(brands());
+  if (platform_ != "iOS") values->setBrands(brands());
   values->setMobile(is_mobile_);
   values->setPlatform(platform_);
   // Record IdentifiabilityStudy metrics for `mobile()` and `platform()` (the
@@ -252,33 +252,33 @@ ScriptPromise<UADataValues> NavigatorUAData::getHighEntropyValues(
   if (AllowedToCollectHighEntropyValues(execution_context)) {
     for (const String& hint : hints) {
       if (hint == "platformVersion") {
-        values->setPlatformVersion(platform_version_);
+        if (platform_ != "iOS") values->setPlatformVersion(platform_version_);
         MaybeRecordMetric(record_identifiability, hint, platform_version_,
                           execution_context);
       } else if (hint == "architecture") {
-        values->setArchitecture(architecture_);
+        if (platform_ != "iOS") values->setArchitecture(architecture_);
         MaybeRecordMetric(record_identifiability, hint, architecture_,
                           execution_context);
       } else if (hint == "model") {
-        values->setModel(model_);
+        if (platform_ != "iOS") values->setModel(model_);
         MaybeRecordMetric(record_identifiability, hint, model_,
                           execution_context);
       } else if (hint == "uaFullVersion") {
-        values->setUaFullVersion(ua_full_version_);
+        if (platform_ != "iOS") values->setUaFullVersion(ua_full_version_);
         MaybeRecordMetric(record_identifiability, hint, ua_full_version_,
                           execution_context);
       } else if (hint == "bitness") {
-        values->setBitness(bitness_);
+        if (platform_ != "iOS") values->setBitness(bitness_);
         MaybeRecordMetric(record_identifiability, hint, bitness_,
                           execution_context);
       } else if (hint == "fullVersionList") {
-        values->setFullVersionList(full_version_list_);
+        if (platform_ != "iOS") values->setFullVersionList(full_version_list_);
       } else if (hint == "wow64") {
-        values->setWow64(is_wow64_);
+        if (platform_ != "iOS") values->setWow64(is_wow64_);
         MaybeRecordMetric(record_identifiability, hint, is_wow64_ ? "?1" : "?0",
                           execution_context);
       } else if (hint == "formFactors") {
-        values->setFormFactors(form_factors_);
+        if (platform_ != "iOS") values->setFormFactors(form_factors_);
         MaybeRecordMetric(record_identifiability, hint, form_factors_,
                           execution_context);
       }
@@ -297,7 +297,7 @@ ScriptPromise<UADataValues> NavigatorUAData::getHighEntropyValues(
 
 ScriptObject NavigatorUAData::toJSON(ScriptState* script_state) const {
   V8ObjectBuilder builder(script_state);
-  builder.AddVector<NavigatorUABrandVersion>("brands", brands());
+  if (platform_ != "iOS") builder.AddVector<NavigatorUABrandVersion>("brands", brands());
   builder.AddBoolean("mobile", mobile());
   builder.AddString("platform", platform());
 

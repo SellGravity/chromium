@@ -181,6 +181,8 @@ static_library("devtools") {
       "devtools_ui_bindings.h",
       "devtools_window.cc",
       "devtools_window.h",
+      "in_process_emulation_client.cc",
+      "in_process_emulation_client.h",
       "features.cc",
       "features.h",
       "gdp_service_handler.cc",

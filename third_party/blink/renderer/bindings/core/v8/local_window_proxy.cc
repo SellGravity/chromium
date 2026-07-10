@@ -219,6 +219,21 @@ void LocalWindowProxy::Initialize() {
   InstallConditionalFeatures();
 
   if (World().IsMainWorld()) {
+    if (GetFrame() && GetFrame()->DomWindow()) {
+      String ua = GetFrame()->DomWindow()->UserAgent();
+      if (ua.Contains("iPhone") || ua.Contains("iPad") || ua.Contains("iPod")) {
+        v8::Local<v8::Object> global = context->Global();
+        v8::Local<v8::Value> navigator_val;
+        if (global->Get(context, V8AtomicString(GetIsolate(), "Navigator")).ToLocal(&navigator_val) && navigator_val->IsFunction()) {
+          v8::Local<v8::Object> navigator_func = navigator_val.As<v8::Object>();
+          v8::Local<v8::Value> proto_val;
+          if (navigator_func->Get(context, V8AtomicString(GetIsolate(), "prototype")).ToLocal(&proto_val) && proto_val->IsObject()) {
+            v8::Local<v8::Object> proto = proto_val.As<v8::Object>();
+            proto->Delete(context, V8AtomicString(GetIsolate(), "userAgentData")).FromMaybe(false);
+          }
+        }
+      }
+    }
     probe::DidCreateMainWorldContext(GetFrame());
     GetFrame()->Loader().DispatchDidClearWindowObjectInMainWorld();
   }

@@ -905,6 +905,9 @@ void DevToolsWindow::ToggleDevToolsWindow(
           u"  const app = window.Emulation.AdvancedApp.instance();"
           u"  if (app.rootSplitWidget.showMode() === 'Both') {"
           u"    app.rootSplitWidget.hideSidebar();"
+          u"    if (app.deviceModeView && !app.deviceModeView.isDeviceModeOn()) {"
+          u"      app.deviceModeView.toggleDeviceMode();"
+          u"    }"
           u"  } else {"
           u"    app.rootSplitWidget.showBoth();"
           u"  }"
@@ -1615,6 +1618,20 @@ void DevToolsWindow::ActivateWindow() {
 }
 
 void DevToolsWindow::CloseWindow() {
+  if (IsAutoOpenedInPhoneMode(GetInspectedWebContents())) {
+    main_web_contents_->GetPrimaryMainFrame()->ExecuteJavaScript(
+        u"if (window.Emulation && window.Emulation.AdvancedApp) {"
+        u"  const app = window.Emulation.AdvancedApp.instance();"
+        u"  if (app.rootSplitWidget.showMode() === 'Both') {"
+        u"    app.rootSplitWidget.hideSidebar();"
+        u"    if (app.deviceModeView && !app.deviceModeView.isDeviceModeOn()) {"
+        u"      app.deviceModeView.toggleDeviceMode();"
+        u"    }"
+        u"  }"
+        u"}",
+        base::DoNothing());
+    return;
+  }
   Close(DevToolsClosedByAction::kCloseButton);
 }
 
